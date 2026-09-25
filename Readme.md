@@ -1,6 +1,6 @@
 # Forksheet CMOS SCM Generator
 
-**Live app:** <https://santhosh111706.github.io/ForkSheet-Device-Generator/>
+**Live app:** <https://santhosh061117.github.io/ForkSheet-Device-Generator/>
 
 A **static, browser-only** parametric generator for 3D Forksheet CMOS
 Sentaurus SDE geometry, with a live interactive 3D preview.
