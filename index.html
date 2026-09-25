@@ -11,7 +11,7 @@
 <!-- Bump ?v= on every edit to css/ or js/. index.html and the scripts are
      cached independently, so a new page paired with an old script silently
      kills init: one missing element and nothing after it runs. -->
-<link rel="stylesheet" href="css/style.css?v=v14-2">
+<link rel="stylesheet" href="css/style.css?v=v14-3">
 
 <!--
   Three.js is loaded as a classic (non-module) script from a CDN.
@@ -838,11 +838,13 @@
     <!-- ---------------- generated deck ---------------- -->
     <section id="sdev-out">
       <div class="preview-head">
-        <h2 class="preview-title">sdevice.cmd <span id="sdev-lines" class="dim"></span></h2>
+        <h2 class="preview-title"><span id="sdev-title">sdevice.cmd</span> <span id="sdev-lines" class="dim"></span></h2>
         <div class="preview-tools">
+          <div class="tool-group" id="sdev-files"></div>
           <div class="tool-group">
             <button id="sdev-copy" class="btn tiny" type="button">Copy</button>
             <button id="sdev-download" class="btn tiny" type="button" disabled>Download</button>
+            <button id="sdev-download-all" class="btn tiny" type="button" hidden>Download both</button>
             <button id="sdev-regen" class="btn tiny" type="button">Regenerate</button>
             <button id="sdev-reset" class="btn tiny" type="button">Reset settings</button>
           </div>
@@ -871,10 +873,10 @@
   SCM Device Viewer &middot; no server, no build step
 </footer>
 
-<script src="js/preview.js?v=v14-2"></script>
-<script src="js/sde-parser.js?v=v14-2"></script>
-<script src="js/analyze.js?v=v14-2"></script>
-<script src="js/sdevice.js?v=v14-2"></script>
-<script src="js/generator.js?v=v14-2"></script>
+<script src="js/preview.js?v=v14-3"></script>
+<script src="js/sde-parser.js?v=v14-3"></script>
+<script src="js/analyze.js?v=v14-3"></script>
+<script src="js/sdevice.js?v=v14-3"></script>
+<script src="js/generator.js?v=v14-3"></script>
 </body>
 </html>

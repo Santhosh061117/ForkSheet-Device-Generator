@@ -2542,6 +2542,12 @@ const sdev = {
   parsed: null,
   analysis: null,
   settings: null,
+  /* One entry per generated file, [{ tag, filename, text }]. `cmd` is
+     whichever of them is on screen, so Copy, Download and hand-editing all
+     act on the file the user is actually looking at. */
+  decks: [],
+  active: 0,
+  activeTag: null,
   cmd: '',
   source: null,
 };
@@ -2919,15 +2925,67 @@ function sdevGenerate() {
       `deck invalid for this structure. See the report.`);
     sdevRenderCode('');
     sdev.cmd = '';
+    sdev.decks = [];
+    sdevRenderFileTabs();
     return;
   }
 
-  sdev.cmd = window.SDevice.buildSdevice(sdev.parsed, sdev.analysis, sdev.settings);
-  sdevRenderCode(sdev.cmd);
+  /* Each device is its own file. Keeping them separate all the way to the
+     download is the point: one deck, one File block, one set of output
+     prefixes - a concatenation is not a runnable command file. */
+  sdev.decks = window.SDevice.buildDecks(sdev.parsed, sdev.analysis, sdev.settings);
+  if (!sdev.decks.length) {
+    sdevSetStatus('error', '<strong>Nothing generated.</strong> No device matched the selection.');
+    sdevRenderCode('');
+    sdev.cmd = '';
+    sdev.decks = [];
+    sdevRenderFileTabs();
+    return;
+  }
+  // keep showing the same device across regenerations where we still can
+  const keep = sdev.decks.findIndex((d) => d.tag === sdev.activeTag);
+  sdevRenderFileTabs();
+  sdevShowDeck(keep >= 0 ? keep : 0);
+
   const warns = v.findings.filter((f) => f.level === 'warn').length;
+  const list = sdev.decks.map((d) => d.filename + ' (' + d.text.split('\n').length + ' lines)').join(', ');
   sdevSetStatus(warns ? 'warn' : 'ok',
-    `<strong>Generated.</strong> ${sdev.cmd.split('\n').length} lines for ` +
-    `${escapeHtml(sdev.settings.grid)}` + (warns ? `, ${warns} warning(s).` : '.'));
+    '<strong>Generated ' + sdev.decks.length + ' file' +
+    (sdev.decks.length > 1 ? 's' : '') + '.</strong> ' +
+    escapeHtml(list) + ' for ' + escapeHtml(sdev.settings.grid) +
+    (warns ? ', ' + warns + ' warning(s).' : '.'));
+}
+
+/** One button per generated file; clicking shows that deck. */
+function sdevRenderFileTabs() {
+  const box = $('#sdev-files');
+  if (!box) return;
+  const many = sdev.decks.length > 1;
+  box.innerHTML = many
+    ? sdev.decks.map((d, i) =>
+        '<button class="filetab" type="button" data-i="' + i + '">' +
+        escapeHtml(d.filename) + '</button>').join('')
+    : '';
+  box.querySelectorAll('.filetab').forEach((btn) => {
+    btn.addEventListener('click', () => sdevShowDeck(Number(btn.dataset.i)));
+  });
+  const all = $('#sdev-download-all');
+  if (all) all.hidden = !many;
+}
+
+/** Show one deck: the editor, the title, and what Copy and Download act on. */
+function sdevShowDeck(i) {
+  const d = sdev.decks[i];
+  if (!d) return;
+  sdev.active = i;
+  sdev.activeTag = d.tag;
+  sdev.cmd = d.text;                 // Copy and Download follow the shown file
+  const t = $('#sdev-title');
+  if (t) t.textContent = d.filename;
+  $$('#sdev-files .filetab').forEach((btn, k) => {
+    btn.classList.toggle('active', k === i);
+  });
+  sdevRenderCode(d.text);
 }
 
 /* --------------------------------------------------------------- search */
@@ -3043,8 +3101,22 @@ function initSdevice() {
 
   on('#sdev-download', 'click', () => {
     if (!sdev.cmd) return;
-    downloadText('sdevice.cmd', sdev.cmd);
-    sdevSetStatus('ok', '<strong>Downloaded sdevice.cmd.</strong>');
+    // the shown file, under its own name - not a generic sdevice.cmd
+    const d = sdev.decks[sdev.active];
+    const fn = d ? d.filename : 'sdevice.cmd';
+    downloadText(fn, sdev.cmd);
+    sdevSetStatus('ok', `<strong>Downloaded ${escapeHtml(fn)}.</strong>`);
+  });
+
+  /* Browsers throttle rapid successive downloads, so the second file is
+     offered after a short gap rather than being dropped silently. */
+  on('#sdev-download-all', 'click', () => {
+    if (!sdev.decks || sdev.decks.length < 2) return;
+    sdev.decks.forEach((dk, k) => {
+      setTimeout(() => downloadText(dk.filename, dk.text), k * 400);
+    });
+    sdevSetStatus('ok', `<strong>Downloading ${sdev.decks.length} files:</strong> ` +
+      escapeHtml(sdev.decks.map((dk) => dk.filename).join(', ')) + '.');
   });
 
   on('#sdev-find', 'input', sdevFind);
@@ -3057,8 +3129,10 @@ function initSdevice() {
       sdevSetStatus('warn',
         '<strong>Editing by hand.</strong> Regenerate will discard your edits.');
     } else {
-      // take the edited text back, so Copy and Download carry it
+      /* Take the edited text back into the deck it came from, not just into
+         `cmd`: otherwise switching files and back would silently revert it. */
       sdev.cmd = [...pre.querySelectorAll('.cl')].map((d) => d.textContent).join('\n');
+      if (sdev.decks[sdev.active]) sdev.decks[sdev.active].text = sdev.cmd;
       sdevRenderCode(sdev.cmd);
     }
   });

@@ -185,16 +185,36 @@
     return s.replace(/0$/, '').replace(/\.$/, '.0');
   }
 
-  function buildSdevice(parsed, analysis, st) {
+  /**
+   * The decks, as separate files.
+   *
+   * The nMOS and pMOS are separate simulations that happen to share a mesh,
+   * so they are separate files: each has its own File block naming its own
+   * Plot, Current and Output prefixes, and running one has nothing to do
+   * with running the other. Concatenating them into one text - which is what
+   * this used to do for "both" - produced something that is not a valid
+   * command file at all, because SDevice reads exactly one File block.
+   *
+   * Returns [{ tag, filename, text }], in n-then-p order.
+   */
+  function buildDecks(parsed, analysis, st) {
     const elec = classifyElectrodes(parsed.contacts);
     const devs = devicesOf(elec);
     const want = st.device === 'both' ? devs : devs.filter((d) => d.tag === st.device);
-    if (!want.length) {
+    return want.map((d) => ({
+      tag: d.tag,
+      filename: `sdevice_${d.tag}mos.cmd`,
+      text: oneDeck(parsed, st, elec, devs, d),
+    }));
+  }
+
+  /** One string, for callers that want the decks concatenated. */
+  function buildSdevice(parsed, analysis, st) {
+    const decks = buildDecks(parsed, analysis, st);
+    if (!decks.length) {
       return '* No device matching the selection was found in this structure.\n';
     }
-    return want.map((d) => oneDeck(parsed, st, elec, devs, d)).join(
-      '\n\n' + '* '.repeat(1) +
-      '='.repeat(74) + '\n\n');
+    return decks.map((d) => d.text).join('\n');
   }
 
   function oneDeck(parsed, st, elec, devs, d) {
@@ -683,7 +703,7 @@
 
   window.SDevice = {
     classifyElectrodes, devicesOf, defaultSettings,
-    validate, buildSdevice, buildMeshBlock, currentPlotRegions,
+    validate, buildSdevice, buildDecks, buildMeshBlock, currentPlotRegions,
   };
 
 })();

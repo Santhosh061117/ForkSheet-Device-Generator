@@ -69,7 +69,11 @@ Everything runs in the browser.
 **SDevice**
 
 Two decks, one per device, because the nMOS and pMOS share a mesh but are
-simulated separately. Each is isothermal drift-diffusion at 300 K - no
+simulated separately. They are kept as separate files all the way to the
+download - `sdevice_nmos.cmd` and `sdevice_pmos.cmd` - since a deck holds
+exactly one `File` block and one set of output prefixes, so concatenating
+them would not be runnable. The output pane has a tab per file; Copy and
+Download act on whichever is shown, and Download both writes the pair. Each is isothermal drift-diffusion at 300 K - no
 Thermodynamic, no Thermode - with the gate workfunction applied region by
 region through `Physics ( Region = ... )` as the threshold knob, and the idle
 device held at its own workfunction so it stays off. Each deck runs an Id-Vg

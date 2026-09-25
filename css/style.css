@@ -1303,3 +1303,23 @@ body.script-expanded #scm-section { max-height: none; flex: 1 1 auto; }
   text-transform: uppercase;
   letter-spacing: .5px;
 }
+
+/* the deck file switcher in the SDevice output header */
+#sdev-files { gap: 4px; }
+#sdev-files .filetab {
+  padding: 3px 10px;
+  font-size: 11px;
+  font-family: var(--mono, ui-monospace, monospace);
+  color: var(--fg-dim);
+  background: var(--bg-2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  cursor: pointer;
+}
+#sdev-files .filetab:hover { color: var(--fg); }
+#sdev-files .filetab.active {
+  color: var(--fg);
+  background: var(--bg-3);
+  border-color: var(--accent);
+}
+
