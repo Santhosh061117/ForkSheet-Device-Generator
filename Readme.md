@@ -5,12 +5,20 @@
 A **static, browser-only** parametric generator for 3D Forksheet CMOS
 Sentaurus SDE geometry, with a live interactive 3D preview.
 
-It is a direct port of the Python generator `gen_forksheet.py` and emits the
-**V13** structure: a two-layer gate stack (interfacial SiO<sub>2</sub> with
-HfO<sub>2</sub> outside it), retrograde P and N wells over a 200 nm device
-domain, a single asymmetric gate bridge per transistor, and an n-well tap so
-the pFET body is not left floating. The generated `.scm` files are compatible
-with the SCM Device Viewer project.
+It is a direct port of the Python generator `gen_forksheet.py`. The structure
+is the V7-derived baseline: a single HfO<sub>2</sub> collar directly on the
+silicon, a gate bridge on both Z sides of each device, a 150 nm substrate
+split into bulk, p-well and n-well, and **seven** contacts. The generated
+`.scm` files are compatible with the SCM Device Viewer project.
+
+**The n-well has no electrode, so it floats.** `Substrate_NW` is phosphorus on
+the boron bulk - a real pn junction - and the only substrate contact is on the
+bottom face of `Substrate_Bulk`. The n-well therefore charges down with the
+drain until the p+/n-well junction forward-biases, which turns on the lateral
+open-base p+/n/p+ bipolar. That path ignores the pMOS gate, so the pMOS Id-Vg
+is not gate-controlled. The nMOS is unaffected: `Substrate_PW` is the same
+type and level as the bulk, so it is tied to the substrate contact. The
+analyser and the SDevice validator both flag this.
 
 Output is a **step-by-step script**: every command written out one by one,
 no comments and no `(define ...)` block - each coordinate is a literal
@@ -39,7 +47,7 @@ Everything runs in the browser.
   and `N_SHEETS` (number of nanosheets)
 - All nine fixed design constants exposed under Advanced:
   `L_PAD`, `T_SPACER`, `L_G`, `T_IL`, `T_HFO2`, `T_METAL`, `T_LINER`,
-  `T_BRIDGE`, `T_DOMAIN`, `T_WELL`, plus the mesh size control
+  `T_BRIDGE`, `T_SUB`, `T_WELL`, plus the mesh size control
 - Six doping concentrations as parameters, not constants: `N_SUB`,
   `N_WELLP`, `N_WELLN`, `N_CHAN`, `N_EXT`, `N_SD`
 - Every dependent coordinate recomputed from those inputs, exactly as the
@@ -60,16 +68,15 @@ Everything runs in the browser.
 
 **SDevice**
 
-Checked against the Sentaurus Device tutorial and user guide, and the deck
-now covers: the `File` section including the `Parameter` .par file;
-per-electrode `Voltage`, `Workfunction`, `Resistor`, `Schottky` and
-`Barrier`; drift-diffusion, Thermodynamic and Hydrodynamic transport;
-mobility, recombination, bandgap-narrowing, interface and tunnelling
-models; the full `Plot` dataset list including driving forces and
-generation; `Math` with `ErrRef`, `Number_Of_Threads`, `Transient` scheme
-and `PlotExplicit`; and `Solve` with `Quasistationary` (including
-`Decrement`), `Transient`, `ACCoupled` small-signal, and current-driven
-sweeps via `set(... mode current)`.
+Two decks, one per device, because the nMOS and pMOS share a mesh but are
+simulated separately. Each is isothermal drift-diffusion at 300 K - no
+Thermodynamic, no Thermode - with the gate workfunction applied region by
+region through `Physics ( Region = ... )` as the threshold knob, and the idle
+device held at its own workfunction so it stays off. Each deck runs an Id-Vg
+at linear and at saturation VDS, then a family of Id-Vd sweeps, resetting to
+0 V between them. pMOS biases are negated automatically and its output files
+carry an `m` for minus. Electrode names, gate region names and the grid
+filename all come from the parsed SCM.
 
 - A **Generate SDevice** button opens a separate window: load or paste an
   SCM, analyze it, configure, generate `sdevice.cmd`, validate, edit, export
@@ -326,27 +333,24 @@ There is one emitter, `buildFlatScm()`, and it writes geometry straight from
 `regionList()` - so the build order has a single source of truth rather than
 a template kept in step with it by hand.
 
-Current output at the default geometry: **224 lines, 18513 bytes, zero
-`(define ...)` lines and zero comments**, giving 110 regions, 5 materials,
-8 contacts, 25 doping placements and 31 refinements.
+Current output at the default geometry: **189 lines, zero `(define ...)`
+lines and zero comments**, giving 88 regions, 5 materials, 7 contacts, 25
+doping placements and 9 profiles.
 
 The region count scales with the sheet count: 54 regions at one nanosheet,
 110 at three, 250 at eight. Nothing in the output assumes three sheets,
 because nothing in it is a symbol - every coordinate is a literal.
 
-All fourteen parametric inputs can be recovered from a generated file by
+All thirteen parametric inputs can be recovered from a generated file by
 measurement alone - `T_NS`, `W_NS`, `T_FORK`, `L_G`, `T_SPACER`, `L_PAD`,
-`N_SHEETS`, `T_IL`, `T_HFO2`, `T_METAL`, `T_LINER`, `T_BRIDGE`, `T_DOMAIN`,
-`T_WELL` - checked exactly against the values the generator was given.
-The interfacial layer and the gate liner are both SiO<sub>2</sub> and the
-interfacial layer is the thinner of the two, so they are told apart by
-geometry: the interfacial oxide is the one built against the high-k.
+`N_SHEETS`, `T_HFO2`, `T_METAL`, `T_LINER`, `T_BRIDGE`, `T_SUB`, `T_WELL` -
+checked exactly against the values the generator was given.
 
 Equivalence is not asserted, it is checked. The test parses the generated
 output with `window.SDE` and compares the resulting region list - name,
 material and all six bounds - against `regionList()` directly, and against
-the reference V13 script, including its doping placements, profiles,
-contacts and refinements. Parentheses stay balanced, every line is a
+the reference coordinate table, along with the region, material and
+contact counts. Parentheses stay balanced, every line is a
 complete command, and no `;` and no `(define` survive, including when a
 custom mesh prefix contains a semicolon.
 
@@ -395,13 +399,12 @@ and the contact that lands on nothing.
 | 6 | 148 | 43 | 5 | clean |
 | 8 | 188 | 55 | 7 | clean |
 
-**The SDevice generator is checked against two different structures.** The
-app's own output has seven contacts; the V13 reference has eight, the extra
-one being an `nwell` electrode on the pFET body. The same code produces a
-seven-electrode deck for the first and an eight-electrode deck for the
-second, with the right `Grid` filename in each, and reports "no well or body
-electrode for the PMOS" only for the one that genuinely lacks it. That is
-the test that a template would fail.
+**The SDevice generator is checked against more than one structure.** Every
+name it writes - electrodes, gate regions, the `Grid` filename - is read from
+the parsed SCM, so a structure with an extra body electrode produces a deck
+that declares it, and one without produces a deck that does not and a warning
+saying why the pMOS will not be gate-controlled. That is the test a fixed
+template would fail.
 
 **Mesh size is an SCM control, not an SDevice one.** By the time SDevice
 runs, the mesh is already a `.tdr` file - refinement is defined in the SDE
@@ -440,8 +443,8 @@ source/drain if a file that has them is loaded, and says nothing about them
 when it is not.
 
 Output from this generator was loaded back into its own viewer and passed
-all eleven geometry checks: 110 regions, 5 materials, 8 contacts, no
-overlaps, no gaps, both gates connected, both dielectric collars closed.
+all eleven geometry checks: 88 regions, 5 materials, 7 contacts, no
+overlaps, no gaps, both gates connected, every collar closed.
 
 ---
 

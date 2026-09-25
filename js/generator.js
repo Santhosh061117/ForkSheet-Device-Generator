@@ -42,17 +42,12 @@ const DEFAULT_CONSTANTS = {
   L_PAD:    0.025,    // source / drain pad length in X
   T_SPACER: 0.005,    // spacer thickness each side of the gate, in X
   L_G:      0.020,    // gate length in X
-  T_IL:     0.0008,   // interfacial SiO2, directly on the silicon
-  T_HFO2:   0.002,    // HfO2, outside the IL
+  T_HFO2:   0.002,    // HfO2 collar, directly on the silicon, all four faces
   T_METAL:  0.006,    // gate metal thickness in each vertical gap
   T_LINER:  0.002,    // SiO2 gate liner thickness
-  T_BRIDGE: 0.010,    // gate metal on the ONE open Z face
-  /* Simulation DOMAIN depth, not a wafer thickness. The side walls are
-     adiabatic, which is a dense-array assumption, so thermal resistance
-     grows linearly with this and never converges: a deeper domain simply
-     reports a hotter device. Justify it with a depth sweep. */
-  T_DOMAIN: 0.200,
-  T_WELL:   0.050,    // retrograde well depth from y = 0
+  T_BRIDGE: 0.010,    // gate metal on EACH Z side of the device
+  T_SUB:    0.150,    // total substrate depth
+  T_WELL:   0.100,    // well depth measured from y = 0
   // mesh minimum element sizes, used by the warning checks
   MESH_MIN_X: 0.003,
   MESH_MIN_Y: 0.001,
@@ -73,13 +68,10 @@ const DEFAULT_CONSTANTS = {
    part of the design, not part of the boilerplate. Names match the profile
    names emitted into the script. */
 const DEFAULT_DOPING = {
-  N_SUB:   3e17,      // p substrate / thermal domain
-  N_WELLP: 3e18,      // nFET body
-  N_WELLN: 3e18,      // pFET body
-  /* Effectively undoped. At 3e17 a 20 x 6 x 30 nm channel holds about ONE
-     dopant atom, so the threshold would be a single-atom lottery; with an
-     undoped channel Vt comes from the gate workfunction instead. */
-  N_CHAN:  1e16,
+  N_SUB:   1e17,      // p bulk
+  N_WELLP: 1e17,      // nFET body, same type and level as the bulk
+  N_WELLN: 1e17,      // pFET body
+  N_CHAN:  3e17,
   N_EXT:   5e19,      // source/drain extensions under the spacers
   N_SD:    1e20,      // source/drain pads
 };
@@ -168,11 +160,10 @@ function compute(t_ns, w_ns, t_fork, C) {
   g.ygb0 = g.yl1;                  // gate_bottom
   g.ygb1 = g.ygb0 + C.T_METAL;
 
-  /* The gated faces now carry a two-layer stack, an interfacial SiO2 with
-     HfO2 outside it, so every vertical clearance is the TOTAL dielectric
-     and not the HfO2 alone. Getting this wrong closes the metal gap by
-     1.6 nm per sheet and the collars stop fitting. */
-  g.t_diel = C.T_IL + C.T_HFO2;
+  /* One dielectric layer, the HfO2 collar, sitting directly on the
+     silicon on all four gated faces. Every vertical clearance is this
+     single thickness. */
+  g.t_diel = C.T_HFO2;
 
   //   sheet-to-sheet pitch = sheet + dielectric above + below + metal gap
   g.y_pitch = t_ns + 2 * g.t_diel + C.T_METAL;
@@ -219,37 +210,30 @@ function compute(t_ns, w_ns, t_fork, C) {
   g.y_sd0 = 0.0;                   // S/D pad bottom
   g.y_sd1 = top.b;                 // S/D pad top follows the topmost sheet
 
-  g.ysub0 = -C.T_DOMAIN;
+  g.ysub0 = -C.T_SUB;
   g.ywell = -C.T_WELL;
   g.ysub1 = 0.0;
 
   /* ---- Z : nMOS | fork wall | pMOS ----------------------------------
-     The gate metal wraps only the OUTER Z face of each device. On the
-     inner face the fork wall sits directly against the dielectric, which
-     is what makes this a forksheet rather than two nanosheet devices side
-     by side: each gate is three-sided, and the wall - not metal - sets the
-     nMOS-to-pMOS spacing. So the two devices are mirror images, and each
-     has exactly one bridge. */
+     Each device carries a gate bridge on BOTH Z sides, so the two are
+     geometric mirrors of each other and the fork wall sits between two
+     complete gate envelopes rather than against bare dielectric. */
   g.zng0 = -(C.T_BRIDGE + g.t_diel);   // nMOS gate outer, -Z
   g.znh0 = g.zng0 + C.T_BRIDGE;        // dielectric outer
   g.znc0 = g.znh0 + g.t_diel;          // channel, always 0.0
   g.znc1 = g.znc0 + w_ns;
   g.znh1 = g.znc1 + g.t_diel;
-  g.zng1 = g.znh1;                     // no bridge here: the wall abuts
+  g.zng1 = g.znh1 + C.T_BRIDGE;        // nMOS gate outer, +Z
 
   g.zw0 = g.zng1;                      // fork wall
   g.zw1 = g.zw0 + t_fork;
 
-  g.zpg0 = g.zw1;                      // pMOS envelope starts at the wall
-  g.zph0 = g.zpg0;                     // no bridge here either
+  g.zpg0 = g.zw1;                      // pMOS gate outer, -Z
+  g.zph0 = g.zpg0 + C.T_BRIDGE;
   g.zpc0 = g.zph0 + g.t_diel;
   g.zpc1 = g.zpc0 + w_ns;
   g.zph1 = g.zpc1 + g.t_diel;
   g.zpg1 = g.zph1 + C.T_BRIDGE;        // pMOS gate outer, +Z
-
-  // where each device's single bridge sits
-  g.nbr = [g.zng0, g.znh0];
-  g.pbr = [g.zph1, g.zpg1];
 
   g.z_well = g.zw0 + t_fork / 2.0;     // well split, wall midplane
 
@@ -269,8 +253,6 @@ function compute(t_ns, w_ns, t_fork, C) {
   }
   g.sheets = g.sheets.map((sh) => ({ a: snap(sh.a), b: snap(sh.b) }));
   g.inter = g.inter.map((b) => ({ lo: snap(b.lo), hi: snap(b.hi), tag: b.tag }));
-  g.nbr = g.nbr.map(snap);
-  g.pbr = g.pbr.map(snap);
 
   return g;
 }
@@ -294,14 +276,14 @@ function regionList(g, C) {
     });
   };
 
-  add('Substrate_P', 'Silicon', g.x0, g.x3, g.ysub0, g.ywell, g.zng0, g.zpg1);
-  add('Well_P',      'Silicon', g.x0, g.x3, g.ywell, g.ysub1, g.zng0, g.z_well);
-  add('Well_N',      'Silicon', g.x0, g.x3, g.ywell, g.ysub1, g.z_well, g.zpg1);
+  add('Substrate_Bulk', 'Silicon', g.x0, g.x3, g.ysub0, g.ywell, g.zng0, g.zpg1);
+  add('Substrate_PW',   'Silicon', g.x0, g.x3, g.ywell, g.ysub1, g.zng0, g.z_well);
+  add('Substrate_NW',   'Silicon', g.x0, g.x3, g.ywell, g.ysub1, g.z_well, g.zpg1);
   add('ForkWall',       'Si3N4',   g.x0, g.x3, g.ysub1, g.ygt1,  g.zw0,  g.zw1);
 
   const sheets = g.sheets.map((s, i) => [String(i + 1), s.a, s.b]);
 
-  const device = (tag, zga, zha, zca, zcb, zhb, zgb, br, zbr0, zbr1) => {
+  const device = (tag, zga, zha, zca, zcb, zhb, zgb) => {
     add(tag + '_GateLiner', 'SiO2',    g.xg0, g.xg1, g.yl0,   g.yl1,   zga, zgb);
     add(tag + '_Source',    'Silicon', g.x0,  g.x1,  g.y_sd0, g.y_sd1, zga, zgb);
     add(tag + '_Drain',     'Silicon', g.x2,  g.x3,  g.y_sd0, g.y_sd1, zga, zgb);
@@ -310,25 +292,22 @@ function regionList(g, C) {
       add(`${tag}_Sheet${st}_chan`, 'Silicon', g.xg0, g.xg1, a, b, zca, zcb);
       add(`${tag}_Sheet${st}_extD`, 'Silicon', g.xg1, g.x2,  a, b, zca, zcb);
     }
-    /* Two nested closed collars. The IL uses the sheet faces, the HfO2 uses
-       the IL's outer faces, so no straight line leaves the silicon and
-       reaches metal without crossing both. */
-    const il = C.T_IL;
+    /* One closed collar per sheet: below and above span the full dielectric
+       width, the two side slabs fill the remaining Z. Together they close,
+       so no straight line leaves the silicon and reaches metal without
+       crossing HfO2. */
+    const t = C.T_HFO2;
     for (const [st, a, b] of sheets) {
-      add(`${tag}_IL_s${st}_bot`, 'SiO2', g.xg0, g.xg1, a - il, a, zca - il, zcb + il);
-      add(`${tag}_IL_s${st}_top`, 'SiO2', g.xg0, g.xg1, b, b + il, zca - il, zcb + il);
-      add(`${tag}_IL_s${st}_zlo`, 'SiO2', g.xg0, g.xg1, a, b, zca - il, zca);
-      add(`${tag}_IL_s${st}_zhi`, 'SiO2', g.xg0, g.xg1, a, b, zcb, zcb + il);
-
-      add(`${tag}_HfO2_s${st}_bot`, 'HfO2', g.xg0, g.xg1,
-          a - il - C.T_HFO2, a - il, zha, zhb);
-      add(`${tag}_HfO2_s${st}_top`, 'HfO2', g.xg0, g.xg1,
-          b + il, b + il + C.T_HFO2, zha, zhb);
-      add(`${tag}_HfO2_s${st}_zlo`, 'HfO2', g.xg0, g.xg1, a - il, b + il, zha, zca - il);
-      add(`${tag}_HfO2_s${st}_zhi`, 'HfO2', g.xg0, g.xg1, a - il, b + il, zcb + il, zhb);
+      add(`${tag}_HfO2_s${st}_bot`, 'HfO2', g.xg0, g.xg1, a - t, a, zha, zhb);
+      add(`${tag}_HfO2_s${st}_top`, 'HfO2', g.xg0, g.xg1, b, b + t, zha, zhb);
+      add(`${tag}_HfO2_s${st}_zlo`, 'HfO2', g.xg0, g.xg1, a, b, zha, zca);
+      add(`${tag}_HfO2_s${st}_zhi`, 'HfO2', g.xg0, g.xg1, a, b, zcb, zhb);
     }
     add(tag + '_gate_bottom',   'TiN', g.xg0, g.xg1, g.ygb0,   g.ygb1,   zga, zgb);
-    add(`${tag}_gate_bridge_${br}`, 'TiN', g.xg0, g.xg1, g.ybr0, g.ybr1, zbr0, zbr1);
+    /* A bridge down each Z side, so every metal slab reaches every other
+       and one contact on gate_top drives all three channels. */
+    add(`${tag}_gate_bridge_L`, 'TiN', g.xg0, g.xg1, g.ybr0, g.ybr1, zga, zha);
+    add(`${tag}_gate_bridge_R`, 'TiN', g.xg0, g.xg1, g.ybr0, g.ybr1, zhb, zgb);
     for (const band of g.inter) {
       add(`${tag}_gate_inter${band.tag}`, 'TiN', g.xg0, g.xg1, band.lo, band.hi, zha, zhb);
     }
@@ -347,8 +326,8 @@ function regionList(g, C) {
     }
   };
 
-  device('n', g.zng0, g.znh0, g.znc0, g.znc1, g.znh1, g.zng1, 'L', g.nbr[0], g.nbr[1]);
-  device('p', g.zpg0, g.zph0, g.zpc0, g.zpc1, g.zph1, g.zpg1, 'R', g.pbr[0], g.pbr[1]);
+  device('n', g.zng0, g.znh0, g.znc0, g.znc1, g.znh1, g.zng1);
+  device('p', g.zpg0, g.zph0, g.zpc0, g.zpc1, g.zph1, g.zpg1);
   return R;
 }
 
@@ -521,42 +500,23 @@ function validate(t_ns, w_ns, t_fork, C) {
   if (g.zw1 - g.zw0 < EPS) errs.push('fork wall has zero thickness');
 
   /* -- 8. gate dielectric closure ---------------------------------------
-     Two nested collars now: the interfacial layer closes against the
-     silicon, and the HfO2 closes against the IL's outer faces. Both are
-     checked, because a gap in either one is a path from channel to metal.
-     Checking only the HfO2 against the sheet - which is what this did
-     while the stack was single-layer - reports a break on a perfectly
-     good structure, since the HfO2 no longer touches the silicon at all. */
-  const il = C.T_IL;
+     One collar per sheet, closing directly on the silicon: below, above
+     and both Z sides. A gap in any of the four is a path from channel to
+     metal that crosses no dielectric. */
   for (const [tag, zca, zcb] of [['n', g.znc0, g.znc1], ['p', g.zpc0, g.zpc1]]) {
-    for (const [st, a, b] of g.sheets.map((sh, i) => ['s' + (i + 1), sh.a, sh.b])) {
-
-      const ilc = R.filter((r) => r.name.startsWith(`${tag}_IL_${st}`));
-      if (ilc.length !== 4) {
-        errs.push(`${tag}MOS ${st}: expected 4 interfacial slabs, found ${ilc.length}`);
-      } else {
-        const below = ilc.some((r) => Math.abs(r.y1 - a) < EPS);
-        const above = ilc.some((r) => Math.abs(r.y0 - b) < EPS);
-        const zlo   = ilc.some((r) => Math.abs(r.z1 - zca) < EPS);
-        const zhi   = ilc.some((r) => Math.abs(r.z0 - zcb) < EPS);
-        if (!(below && above && zlo && zhi)) {
-          errs.push(`${tag}MOS ${st}: interfacial collar is not closed on the silicon ` +
-                    `(below=${below} above=${above} -Z=${zlo} +Z=${zhi})`);
-        }
-      }
-
+    for (const [st, a2, b2] of g.sheets.map((sh, i) => ['s' + (i + 1), sh.a, sh.b])) {
       const hf = R.filter((r) => r.name.startsWith(`${tag}_HfO2_${st}`));
       if (hf.length !== 4) {
         errs.push(`${tag}MOS ${st}: expected 4 HfO2 slabs, found ${hf.length}`);
-      } else {
-        const below = hf.some((r) => Math.abs(r.y1 - (a - il)) < EPS);
-        const above = hf.some((r) => Math.abs(r.y0 - (b + il)) < EPS);
-        const zlo   = hf.some((r) => Math.abs(r.z1 - (zca - il)) < EPS);
-        const zhi   = hf.some((r) => Math.abs(r.z0 - (zcb + il)) < EPS);
-        if (!(below && above && zlo && zhi)) {
-          errs.push(`${tag}MOS ${st}: HfO2 collar is not closed on the interfacial layer ` +
-                    `(below=${below} above=${above} -Z=${zlo} +Z=${zhi})`);
-        }
+        continue;
+      }
+      const below = hf.some((r) => Math.abs(r.y1 - a2) < EPS);
+      const above = hf.some((r) => Math.abs(r.y0 - b2) < EPS);
+      const zlo   = hf.some((r) => Math.abs(r.z1 - zca) < EPS);
+      const zhi   = hf.some((r) => Math.abs(r.z0 - zcb) < EPS);
+      if (!(below && above && zlo && zhi)) {
+        errs.push(`${tag}MOS ${st}: HfO2 collar is not closed on the silicon ` +
+                  `(below=${below} above=${above} -Z=${zlo} +Z=${zhi})`);
       }
     }
   }
@@ -578,7 +538,7 @@ function validate(t_ns, w_ns, t_fork, C) {
     ['source_p',  (g.x0 + g.x1) / 2,  g.y_sd1, g.zpc_mid, 'p_Source',       'top'],
     ['drain_p',   (g.x2 + g.x3) / 2,  g.y_sd1, g.zpc_mid, 'p_Drain',        'top'],
     ['gate_p',    (g.xg0 + g.xg1) / 2, g.ygt1, g.zpc_mid, 'p_gate_top',     'top'],
-    ['substrate', (g.x0 + g.x3) / 2,  g.ysub0, g.znc_mid, 'Substrate_P', 'bottom'],
+    ['substrate', (g.x0 + g.x3) / 2,  g.ysub0, g.znc_mid, 'Substrate_Bulk', 'bottom'],
   ];
   for (const [cname, px, py, pz, want, facing] of probes) {
     const owner = R.filter((r) => r.x0 - EPS <= px && px <= r.x1 + EPS &&
@@ -643,13 +603,11 @@ function n(v) {
    a uniformly coarse one that cannot resolve a 2 nm collar.
    ========================================================================== */
 const MESH_ROWS = {
-  RS_global: '0.020 0.020 0.020 0.006 0.006 0.006',
-  RS_active: '0.005 0.002 0.005 0.003 0.001 0.003',
-  RS_diel:   '0.004 0.0008 0.004 0.002 0.0003 0.002',
-  RS_junc:   '0.002 0.002 0.005 0.0015 0.001 0.003',
-  RS_wall:   '0.006 0.005 0.003 0.003 0.002 0.0015',
-  RS_well:   '0.010 0.004 0.008 0.004 0.002 0.004',
-  RS_sub:    '0.030 0.030 0.030 0.012 0.012 0.012',
+  RS_global: '0.030 0.030 0.030 0.010 0.010 0.010',
+  RS_active: '0.008 0.002 0.008 0.004 0.0015 0.004',
+  RS_junc:   '0.003 0.002 0.008 0.002 0.0015 0.004',
+  RS_well:   '0.030 0.020 0.015 0.012 0.008 0.008',
+  RS_sub:    '0.040 0.040 0.040 0.015 0.015 0.015',
 }
 const MESH_BASE_NM = 2;
 
@@ -771,9 +729,9 @@ function buildFlatScm(G, meshPrefix, C) {
   const prof = (name, field, key) =>
     push(`(sdedr:define-constant-profile "${name}"${' '.repeat(Math.max(1, 14 - name.length))}` +
          `"${field}"${' '.repeat(Math.max(1, 31 - field.length))}${conc(dose(key))})`);
-  prof('Prof_Sub',   'BoronActiveConcentration',      'N_SUB');
-  prof('Prof_WellP', 'BoronActiveConcentration',      'N_WELLP');
-  prof('Prof_WellN', 'PhosphorusActiveConcentration', 'N_WELLN');
+  prof('Prof_Bulk',  'BoronActiveConcentration',      'N_SUB');
+  prof('Prof_PWell', 'BoronActiveConcentration',      'N_WELLP');
+  prof('Prof_NWell', 'PhosphorusActiveConcentration', 'N_WELLN');
   push('');
   prof('Prof_nChan', 'BoronActiveConcentration',      'N_CHAN');
   prof('Prof_nExt',  'ArsenicActiveConcentration',    'N_EXT');
@@ -783,9 +741,9 @@ function buildFlatScm(G, meshPrefix, C) {
   prof('Prof_pExt',  'BoronActiveConcentration',      'N_EXT');
   prof('Prof_pSD',   'BoronActiveConcentration',      'N_SD');
   push('');
-  push('(sdedr:define-constant-profile-region "Pl_Sub"   "Prof_Sub"   "Substrate_P")');
-  push('(sdedr:define-constant-profile-region "Pl_WellP" "Prof_WellP" "Well_P")');
-  push('(sdedr:define-constant-profile-region "Pl_WellN" "Prof_WellN" "Well_N")');
+  push('(sdedr:define-constant-profile-region "Pl_Bulk"  "Prof_Bulk"  "Substrate_Bulk")');
+  push('(sdedr:define-constant-profile-region "Pl_PWell" "Prof_PWell" "Substrate_PW")');
+  push('(sdedr:define-constant-profile-region "Pl_NWell" "Prof_NWell" "Substrate_NW")');
   push('');
   push(...flatDoping('n', N));
   push('');
@@ -803,13 +761,14 @@ function buildFlatScm(G, meshPrefix, C) {
   cset('drain_p',  '0.55', '0.20', '0.75');
   cset('gate_p',   '0.85', '0.35', '0.55');
   cset('substrate', '0.55', '0.55', '0.60');
-  cset('nwell',    '0.35', '0.65', '0.45');
   push('');
 
-  /* nwell sits on the +Z domain-boundary face of Well_N, standing in for a
-     real surface tap: the whole n-well top face is covered by pads, liner
-     and spacers, so there is no room for one. Without it the pFET body
-     floats and the parasitic PNP swamps the channel current. */
+  /* Seven contacts. Substrate_NW has no electrode, so the n-well floats:
+     it charges down with the drain until the p+/n-well junction forward
+     biases and the open-base p+/n/p+ path takes over, which is why the
+     pMOS Id-Vg is not gate-controlled in this structure. Substrate_PW is
+     the same type and level as the bulk, so the nMOS body is tied to the
+     substrate contact and that side is unaffected. */
   for (const [set, px, py, pz] of [
     ['source_n',  n((G.x0 + G.x1) / 2),   n(G.y_sd1), n(G.znc_mid)],
     ['drain_n',   n((G.x2 + G.x3) / 2),   n(G.y_sd1), n(G.znc_mid)],
@@ -818,7 +777,6 @@ function buildFlatScm(G, meshPrefix, C) {
     ['drain_p',   n((G.x2 + G.x3) / 2),   n(G.y_sd1), n(G.zpc_mid)],
     ['gate_p',    n((G.xg0 + G.xg1) / 2), n(G.ygt1),  n(G.zpc_mid)],
     ['substrate', n((G.x0 + G.x3) / 2),   n(G.ysub0), n(G.znc_mid)],
-    ['nwell',     n((G.x0 + G.x3) / 2),   n((G.ywell + G.ysub1) / 2), n(G.zpg1)],
   ]) {
     push(`(sdegeo:set-current-contact-set "${set}")`);
     push(`(sdegeo:set-contact-faces (find-face-id (position ${px} ${py} ${pz})) "${set}")`);
@@ -847,16 +805,6 @@ function buildFlatScm(G, meshPrefix, C) {
   place('RP_actP', 'RS_active', 'RW_actP');
   push('');
 
-  /* The interfacial layer is the thinnest thing in the structure, so the
-     dielectric stack gets its own window: fine in Y where the layers
-     stack, coarse in X and Z where nothing is thin. */
-  push(rsLine('RS_diel', C));
-  win('RW_dielN', G.xg0, G.sheets[0].a - G.t_diel, G.znh0, G.xg1, top + G.t_diel, G.znh1);
-  place('RP_dielN', 'RS_diel', 'RW_dielN');
-  win('RW_dielP', G.xg0, G.sheets[0].a - G.t_diel, G.zph0, G.xg1, top + G.t_diel, G.zph1);
-  place('RP_dielP', 'RS_diel', 'RW_dielP');
-  push('');
-
   push(rsLine('RS_junc', C));
   win('RW_jNs', G.xg0 - 0.005, G.sheets[0].a, G.znh0, G.xg0 + 0.005, top, G.znh1);
   place('RP_jNs', 'RS_junc', 'RW_jNs');
@@ -868,14 +816,9 @@ function buildFlatScm(G, meshPrefix, C) {
   place('RP_jPd', 'RS_junc', 'RW_jPd');
   push('');
 
-  push(rsLine('RS_wall', C));
-  win('RW_wall', G.x0, G.ysub1 - 0.010, G.zw0 - 0.002, G.x3, G.ygt1, G.zw1 + 0.002);
-  place('RP_wall', 'RS_wall', 'RW_wall');
-  push('');
-
   push(rsLine('RS_well', C));
-  win('RW_wellTop', G.x0, G.ywell, G.zng0, G.x3, G.ysub1, G.zpg1);
-  place('RP_wellTop', 'RS_well', 'RW_wellTop');
+  win('RW_well', G.x0, G.ywell, G.zng0, G.x3, G.ysub1, G.zpg1);
+  place('RP_well', 'RS_well', 'RW_well');
   push('');
 
   push(rsLine('RS_sub', C));
@@ -2673,25 +2616,28 @@ function sdevLoad(text, label) {
   return true;
 }
 
-/** Carry user choices forward, but never an electrode that no longer exists. */
+/**
+ * Carry the user's choices forward onto a freshly analysed structure.
+ *
+ * Only keys the NEW settings already define are copied across, so a
+ * setting that no longer exists cannot come back from an older session
+ * and a device that is not in this structure cannot gain a workfunction.
+ */
 function mergeSettings(fresh, old) {
   const out = JSON.parse(JSON.stringify(fresh));
   for (const k of ['physics', 'math', 'plot', 'bias', 'meshControl']) {
-    Object.assign(out[k], old[k] || {});
+    if (!old[k]) continue;
+    for (const key of Object.keys(out[k])) {
+      if (old[k][key] !== undefined) out[k][key] = old[k][key];
+    }
   }
-  out.temperature = old.temperature;
-  out.thermal.enabled = old.thermal.enabled;
-  out.thermal.ambient = old.thermal.ambient;
-  out.thermal.surfaceResistance = old.thermal.surfaceResistance;
-  // the thermode only survives if that contact is still in the structure
-  const names = (fresh.workfunction && Object.keys(fresh.workfunction)) || [];
-  if (old.thermal.thermode &&
-      sdev.parsed.contacts.some((c) => c.name === old.thermal.thermode)) {
-    out.thermal.thermode = old.thermal.thermode;
+  for (const k of ['temperature', 'areaFactor', 'device']) {
+    if (old[k] !== undefined) out[k] = old[k];
   }
-  for (const g of names) {
-    if (old.workfunction && old.workfunction[g] !== undefined) {
-      out.workfunction[g] = old.workfunction[g];
+  // a workfunction only survives if that device is still in the structure
+  for (const tag of Object.keys(out.workfunction)) {
+    if (old.workfunction && old.workfunction[tag] !== undefined) {
+      out.workfunction[tag] = old.workfunction[tag];
     }
   }
   return out;
@@ -2743,132 +2689,58 @@ function sdevFillControls() {
   const set = (id, v) => { const e = document.getElementById(id); if (e) e.value = v; };
   const chk = (id, v) => { const e = document.getElementById(id); if (e) e.checked = !!v; };
 
-  chk('ph-fermi', st.physics.fermi); chk('ph-eid', st.physics.eid);
-  chk('ph-mobdop', st.physics.mobDoping); chk('ph-mobenorm', st.physics.mobEnormal);
+  chk('ph-mobdop', st.physics.mobDoping);
+  chk('ph-mobenorm', st.physics.mobEnormal);
   chk('ph-mobhf', st.physics.mobHighField);
-  chk('ph-srh', st.physics.srh); chk('ph-auger', st.physics.auger);
-  chk('ph-b2b', st.physics.band2band); chk('ph-aval', st.physics.avalanche);
-  chk('ph-quantum', st.physics.quantum);
+  chk('ph-srh', st.physics.srh);
+  chk('ph-eid', st.physics.eid);
+  set('ph-temp', st.temperature);
+  set('ph-area', st.areaFactor);
 
-  chk('th-on', st.thermal.enabled);
-  set('th-ambient', st.thermal.ambient);
-  set('th-rsurf', st.thermal.surfaceResistance);
-
-  // the thermal contact list is the structure's own contacts, nothing else
-  const sel = $('#th-contact');
-  if (sel && sdev.parsed) {
-    sel.innerHTML = '<option value="">(none)</option>' +
-      sdev.parsed.contacts.map((c) =>
-        `<option value="${escapeHtml(c.name)}">${escapeHtml(c.name)}</option>`).join('');
-    sel.value = st.thermal.thermode || '';
-  }
-
-  set('bi-vdd', st.bias.vdd); set('bi-vdlin', st.bias.vdlin);
-  set('bi-vgstart', st.bias.vgStart);
-  chk('bi-idvglin', st.bias.idvgLin); chk('bi-idvgsat', st.bias.idvgSat);
+  set('bi-device', st.device);
+  set('bi-vdd', st.bias.vdd);
+  set('bi-vdlin', st.bias.vdlin);
+  set('bi-step', st.bias.sweepStep);
+  set('bi-intervals', st.bias.intervals);
+  set('bi-vglist', (st.bias.vgSteps || []).map((v) => v.toFixed(2)).join(', '));
+  chk('bi-idvglin', st.bias.idvgLin);
+  chk('bi-idvgsat', st.bias.idvgSat);
   chk('bi-idvd', st.bias.idvd);
+  chk('bi-onstate', st.bias.onStateSnapshot);
 
-  set('ma-digits', st.math.digits); set('ma-iter', st.math.iterations);
-  set('ma-notdamped', st.math.notdamped); set('ma-submethod', st.math.subMethod);
-
-  chk('pl-field', st.plot.field); chk('pl-carriers', st.plot.carriers);
-  chk('pl-mobility', st.plot.mobility); chk('pl-bands', st.plot.bands);
-  chk('pl-temp', st.plot.temperature);
-
-  chk('ph-surfsrh', st.physics.surfaceSRH);
-  set('ph-bgn', st.physics.bandgapNarrowing);
-  set('ph-tunnel', st.physics.tunneling);
-  set('th-lattice', st.thermal.latticeInit);
-  chk('th-heatflux', st.thermal.heatFlux);
-  set('bi-vgstep', st.bias.vgStep);
-  set('bi-quantity', st.bias.sweepQuantity);
-  set('bi-analysis', st.bias.analysis);
-  set('bi-tend', st.bias.transientEnd);
-  set('bi-tstep', st.bias.transientStep);
-  set('ma-initial', st.math.initialGuess);
-  set('ph-transport', st.physics.transport);
+  set('ma-digits', st.math.digits);
+  set('ma-iter', st.math.iterations);
+  set('ma-notdamped', st.math.notdamped);
   set('ma-threads', st.math.threads);
   set('ma-errref', st.math.errRef);
-  set('ma-transcheme', st.math.transientScheme);
-  chk('ma-plotexplicit', st.math.plotExplicit);
-  chk('pl-potential', st.plot.potential); chk('pl-doping', st.plot.doping);
-  chk('pl-current', st.plot.current); chk('pl-recomb', st.plot.recombination);
-  chk('pl-driving', st.plot.drivingForce); chk('pl-bgn', st.plot.bandgapNarrowing);
-  set('ou-parfile', st.output.parameterFile);
-  chk('ac-on', st.output.acAnalysis);
-  set('ac-start', st.output.acStart); set('ac-end', st.output.acEnd);
-  set('ac-pts', st.output.acPointsPerDecade);
-  const ao2 = $('#ac-opts'); if (ao2) ao2.hidden = !st.output.acAnalysis;
-  chk('ou-currentplot', st.output.currentPlot);
-  chk('ou-extract', st.output.extraction);
-  const tr = $('#bi-transient');
-  if (tr) tr.hidden = st.bias.analysis !== 'transient';
+  set('ma-rhsmin', st.math.rhsMin);
+  set('ma-submethod', st.math.method);
+
+  chk('pl-carriers', st.plot.carriers);
+  chk('pl-current', st.plot.current);
+  chk('pl-potential', st.plot.potential);
+  chk('pl-doping', st.plot.doping);
+  chk('pl-quasi', st.plot.quasiFermi);
+  chk('pl-bands', st.plot.bands);
+  chk('pl-mobility', st.plot.mobility);
 
   set('sdev-mesh', Math.round(st.meshControl.size * 10));
 
-  /* One starting-potential field per electrode the SCM declares. Built from
-     st.bias.initial, whose keys came from the parsed contact names - so a
-     structure with different electrodes gets different fields, and nothing
-     here assumes a source/drain/gate/bulk naming scheme. */
-  const eb = $('#bi-electrodes');
-  if (eb) {
-    const names = Object.keys(st.bias.initial || {});
-    eb.innerHTML = names.length
-      ? names.map((nme) =>
-          '<div class="field compact"><label for="bi-v-' + escapeHtml(nme) + '">' +
-          escapeHtml(nme) + '</label><div class="ctl"><input id="bi-v-' + escapeHtml(nme) +
-          '" type="number" step="0.05" value="' + st.bias.initial[nme] +
-          '"><span class="unit">V</span></div></div>').join('')
-      : '<p class="note">No electrodes found in this structure.</p>';
-    for (const nme of names) {
-      const inp = document.getElementById('bi-v-' + nme);
-      if (inp) inp.addEventListener('input', sdevReadControls);
-    }
-  }
-
-  /* One row per electrode: contact type and series resistance. Built from
-     st.electrodeOpts, whose keys are the parsed contact names, so nothing
-     here assumes what the electrodes are called. */
-  const co = $('#bi-contactopts');
-  if (co) {
-    const names = Object.keys(st.electrodeOpts || {});
-    co.innerHTML = names.length
-      ? names.map((nme) => {
-          const e = escapeHtml(nme);
-          const o = st.electrodeOpts[nme];
-          return '<div class="field compact"><label>' + e + '</label>' +
-            '<div class="ctl">' +
-            '<label class="chk-field" style="flex:0 0 auto"><input type="checkbox" id="eo-s-' + e +
-            '"' + (o.schottky ? ' checked' : '') + '><span>Schottky</span></label>' +
-            '<input id="eo-b-' + e + '" type="number" step="0.01" value="' + o.barrier +
-            '" title="Barrier (eV)" style="width:5.5em">' +
-            '<input id="eo-r-' + e + '" type="number" step="1" value="' + o.resistor +
-            '" title="Resistor (ohm)" style="width:5.5em">' +
-            '</div></div>';
-        }).join('')
-      : '<p class="note">No electrodes found in this structure.</p>';
-    for (const nme of names) {
-      for (const pfx of ['eo-s-', 'eo-b-', 'eo-r-']) {
-        const inp = document.getElementById(pfx + nme);
-        if (inp) inp.addEventListener('input', sdevReadControls);
-      }
-    }
-  }
-
-  // one workfunction field per gate actually present
+  /* One workfunction field per DEVICE, not per gate region: the value is
+     applied to every metal region of that gate, so a per-region field
+     would be six copies of the same number. */
   const wf = $('#sdev-wf');
   if (wf) {
-    const gates = Object.keys(st.workfunction);
-    wf.innerHTML = gates.length
-      ? '<div class="an-head" style="margin-top:10px">Gate workfunction</div>' +
-        gates.map((g) =>
-          '<div class="field compact"><label for="wf-' + escapeHtml(g) + '">' +
-          escapeHtml(g) + '</label><div class="ctl"><input id="wf-' + escapeHtml(g) +
-          '" type="number" step="0.01" value="' + st.workfunction[g] +
+    const tags = Object.keys(st.workfunction);
+    wf.innerHTML = tags.length
+      ? tags.map((t) =>
+          '<div class="field compact"><label for="wf-' + escapeHtml(t) + '">' +
+          escapeHtml(t.toUpperCase()) + 'MOS gate</label><div class="ctl"><input id="wf-' +
+          escapeHtml(t) + '" type="number" step="0.01" value="' + st.workfunction[t] +
           '"><span class="unit">eV</span></div></div>').join('')
-      : '';
-    for (const g of gates) {
-      const inp = document.getElementById('wf-' + g);
+      : '<p class="note">No gates found in this structure.</p>';
+    for (const t of tags) {
+      const inp = document.getElementById('wf-' + t);
       if (inp) inp.addEventListener('input', sdevReadControls);
     }
   }
@@ -2883,84 +2755,52 @@ function sdevReadControls() {
     return Number.isFinite(v) ? v : d;
   };
   const on = (id) => { const e = document.getElementById(id); return !!(e && e.checked); };
+  const txt = (id, d) => {
+    const e = document.getElementById(id);
+    return e && e.value.trim() ? e.value.trim() : d;
+  };
 
-  st.physics.fermi = on('ph-fermi'); st.physics.eid = on('ph-eid');
-  st.physics.mobDoping = on('ph-mobdop'); st.physics.mobEnormal = on('ph-mobenorm');
+  st.physics.mobDoping = on('ph-mobdop');
+  st.physics.mobEnormal = on('ph-mobenorm');
   st.physics.mobHighField = on('ph-mobhf');
-  st.physics.srh = on('ph-srh'); st.physics.auger = on('ph-auger');
-  st.physics.band2band = on('ph-b2b'); st.physics.avalanche = on('ph-aval');
-  st.physics.quantum = on('ph-quantum');
-  st.physics.surfaceSRH = on('ph-surfsrh');
-  const tp = $('#ph-transport'); if (tp) st.physics.transport = tp.value;
-  const bgn = $('#ph-bgn'); if (bgn) st.physics.bandgapNarrowing = bgn.value;
-  const tun = $('#ph-tunnel'); if (tun) st.physics.tunneling = tun.value;
+  st.physics.srh = on('ph-srh');
+  st.physics.eid = on('ph-eid');
+  st.temperature = num('ph-temp', 300);
+  st.areaFactor = num('ph-area', 1);
 
-  st.thermal.enabled = on('th-on');
-  const sel = $('#th-contact');
-  st.thermal.thermode = sel && sel.value ? sel.value : null;
-  st.thermal.ambient = num('th-ambient', 300);
-  st.thermal.surfaceResistance = num('th-rsurf', 0);
-  st.thermal.latticeInit = num('th-lattice', 300);
-  st.thermal.heatFlux = on('th-heatflux');
-  st.temperature = st.thermal.ambient;
-
-  st.bias.vdd = num('bi-vdd', 0.75);
+  const dev = $('#bi-device'); if (dev) st.device = dev.value;
+  st.bias.vdd = num('bi-vdd', 0.70);
   st.bias.vdlin = num('bi-vdlin', 0.05);
-  st.bias.vgStart = num('bi-vgstart', -0.3);
-  st.bias.idvgLin = on('bi-idvglin'); st.bias.idvgSat = on('bi-idvgsat');
+  st.bias.sweepStep = num('bi-step', 0.02);
+  st.bias.intervals = num('bi-intervals', 35);
+  st.bias.idvgLin = on('bi-idvglin');
+  st.bias.idvgSat = on('bi-idvgsat');
   st.bias.idvd = on('bi-idvd');
-  st.bias.vgStep = num('bi-vgstep', 0.02);
-  const sq = $('#bi-quantity'); if (sq) st.bias.sweepQuantity = sq.value;
-  const an = $('#bi-analysis'); if (an) st.bias.analysis = an.value;
-  st.bias.transientEnd = num('bi-tend', 1e-9);
-  st.bias.transientStep = num('bi-tstep', 1e-12);
-  const tr = $('#bi-transient');
-  if (tr) tr.hidden = st.bias.analysis !== 'transient';
-  /* Keyed by the electrode names the SCM actually declares. */
-  for (const name of Object.keys(st.bias.initial || {})) {
-    st.bias.initial[name] = num('bi-v-' + name, 0);
-  }
+  st.bias.onStateSnapshot = on('bi-onstate');
+  /* A free-text list, because the number of Id-Vd curves is a choice. Bad
+     entries are dropped rather than silently becoming NaN in a Goal. */
+  const raw = txt('bi-vglist', '0.30, 0.50, 0.70');
+  const list = raw.split(/[,;\s]+/).map(parseFloat).filter((v) => Number.isFinite(v) && v >= 0);
+  if (list.length) st.bias.vgSteps = list;
 
   st.math.digits = num('ma-digits', 5);
-  st.math.iterations = num('ma-iter', 25);
-  st.math.notdamped = num('ma-notdamped', 100);
-  const sm = $('#ma-submethod'); if (sm) st.math.subMethod = sm.value;
-  const ig = $('#ma-initial'); if (ig) st.math.initialGuess = ig.value;
+  st.math.iterations = num('ma-iter', 40);
+  st.math.notdamped = num('ma-notdamped', 20);
   st.math.threads = num('ma-threads', 4);
-  const er = $('#ma-errref'); if (er && er.value.trim()) st.math.errRef = er.value.trim();
-  const tsch = $('#ma-transcheme'); if (tsch) st.math.transientScheme = tsch.value;
-  st.math.plotExplicit = on('ma-plotexplicit');
+  st.math.errRef = txt('ma-errref', '1e10');
+  st.math.rhsMin = txt('ma-rhsmin', '1e-12');
+  const sm = $('#ma-submethod'); if (sm) st.math.method = sm.value;
 
+  st.plot.carriers = on('pl-carriers');
+  st.plot.current = on('pl-current');
   st.plot.potential = on('pl-potential');
   st.plot.doping = on('pl-doping');
-  st.plot.current = on('pl-current');
-  st.plot.recombination = on('pl-recomb');
-  st.plot.drivingForce = on('pl-driving');
-  st.plot.bandgapNarrowing = on('pl-bgn');
+  st.plot.quasiFermi = on('pl-quasi');
+  st.plot.bands = on('pl-bands');
+  st.plot.mobility = on('pl-mobility');
 
-  st.output.currentPlot = on('ou-currentplot');
-  st.output.extraction = on('ou-extract');
-  const pf = $('#ou-parfile'); if (pf) st.output.parameterFile = pf.value.trim();
-  st.output.acAnalysis = on('ac-on');
-  st.output.acStart = num('ac-start', 1e3);
-  st.output.acEnd = num('ac-end', 1e9);
-  st.output.acPointsPerDecade = num('ac-pts', 5);
-  const ao = $('#ac-opts'); if (ao) ao.hidden = !st.output.acAnalysis;
-
-  /* Per-electrode contact options, keyed by the SCM's own names. */
-  for (const name of Object.keys(st.electrodeOpts || {})) {
-    const o = st.electrodeOpts[name];
-    o.resistor = num('eo-r-' + name, 0);
-    o.schottky = on('eo-s-' + name);
-    o.barrier = num('eo-b-' + name, 0);
-  }
-
-  st.plot.field = on('pl-field'); st.plot.carriers = on('pl-carriers');
-  st.plot.mobility = on('pl-mobility'); st.plot.bands = on('pl-bands');
-  st.plot.temperature = on('pl-temp');
-
-  for (const g of Object.keys(st.workfunction)) {
-    st.workfunction[g] = num('wf-' + g, st.workfunction[g]);
+  for (const tag of Object.keys(st.workfunction)) {
+    st.workfunction[tag] = num('wf-' + tag, st.workfunction[tag]);
   }
 
   st.meshControl.size = num('sdev-mesh', 20) / 10;

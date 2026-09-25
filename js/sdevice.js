@@ -77,114 +77,365 @@
 
 
   /* ==================================================================
-     2. DEFAULTS
+     2. SETTINGS
+     ==================================================================
+     Everything the two decks can be told to do. The shape follows the
+     decks themselves: one isothermal drift-diffusion run per device, a
+     pair of Id-Vg sweeps and a family of Id-Vd sweeps, with the gate
+     workfunction as the threshold knob.
+
+     There is no thermal section. These decks are explicitly isothermal -
+     no Thermodynamic, no Thermode - so a self-heating control here would
+     be a switch wired to nothing.
      ================================================================== */
 
   function defaultSettings(parsed, analysis) {
     const elec = classifyElectrodes(parsed.contacts);
     const devs = devicesOf(elec);
-    const bulk = elec.find((e) => e.role === 'bulk');
 
+    /* Gate workfunction is per DEVICE, not per electrode: it is applied to
+       every metal region of that gate, which is how a Vt shift is actually
+       expressed in a deck. The region names come from the structure. */
     const wf = {};
-    for (const d of devs) {
-      // an undoped, fully depleted body wants both metals near midgap
-      wf[d.gate.name] = d.tag === 'p' ? 4.73 : 4.49;
-    }
+    for (const d of devs) wf[d.tag] = d.tag === 'p' ? 4.85 : 4.35;
 
     return {
       stem: parsed.meshPrefix || 'device',
-      /* the grid FILE, not the mesh-size control below - these were both
-         called `mesh` and the object literal silently kept the last one,
-         so every deck came out with Grid = "[object Object]" */
       grid: parsed.meshPrefix ? parsed.meshPrefix + '_msh.tdr' : 'device_msh.tdr',
 
-      workfunction: wf,
+      /* Which deck to write. The two devices share one mesh but are
+         simulated separately, so "both" produces two files. */
+      device: 'both',                 // 'n' | 'p' | 'both'
+
       temperature: 300,
+      areaFactor: 1,
+      workfunction: wf,
 
       physics: {
-        fermi: true,
-        eid: true,                 // EffectiveIntrinsicDensity(OldSlotboom)
         mobDoping: true,
         mobEnormal: true,
         mobHighField: true,
         srh: true,
-        auger: true,
-        band2band: false,
-        avalanche: false,
-        quantum: false,
-        transport: 'dd',                // dd | thermodynamic | hydrodynamic
-        bandgapNarrowing: 'Slotboom',   // '' turns it off
-        surfaceSRH: false,              // interface recombination at the gate oxide
-        tunneling: '',                  // '' | 'NonlocalPath' | 'Schenk'
+        eid: true,                    // EffectiveIntrinsicDensity(OldSlotboom)
       },
-
-      thermal: {
-        enabled: true,
-        thermode: bulk ? bulk.name : null,
-        ambient: 300,
-        surfaceResistance: 0,
-        latticeInit: 300,          // initial lattice temperature
-        heatFlux: true,            // write the heat-flux output variables
-      },
-
-      /* Per-electrode extras. Keyed by the SCM's own contact names. */
-      electrodeOpts: Object.fromEntries(elec.map((e) => [e.name,
-        { resistor: 0, schottky: false, barrier: 0 }])),
 
       bias: {
-        vdd: 0.75,
-        vdlin: 0.05,
-        vgStart: -0.30,            // start below Vt so Ioff and SS are in range
-        vgStep: 0.02,
-        vdStep: 0.02,
-        idvd: true,
+        vdd: 0.70,                    // saturation |Vds|, and the |Vg| sweep end
+        vdlin: 0.05,                  // linear |Vds|
+        vgSteps: [0.30, 0.50, 0.70],  // the Id-Vd family, |Vgs|
+        sweepStep: 0.02,              // MaxStep on the measured sweeps
+        intervals: 35,                // CurrentPlot points per sweep
         idvgLin: true,
         idvgSat: true,
-        /* Starting potentials per electrode, keyed by the name that is
-           actually in the SCM - never a hard-coded "source"/"drain". */
-        initial: Object.fromEntries(elec.map((e) => [e.name, 0])),
-        sweepQuantity: 'voltage',  // voltage | current
-        analysis: 'quasistationary', // quasistationary | transient
-        transientEnd: 1e-9,
-        transientStep: 1e-12,
+        idvd: true,
+        onStateSnapshot: true,        // Plot(...) at the saturation corner
       },
 
       math: {
         digits: 5,
-        iterations: 25,
-        notdamped: 100,
-        extrapolate: true,
-        derivatives: true,
-        relErrControl: true,
-        method: 'Blocked',
-        subMethod: 'ParDiSo',
-        initialGuess: 'zero',      // zero | previous
-        errRef: '1.0e10',
-        threads: 4,                // Number_Of_Threads
-        transientScheme: 'BE',     // Transient = BE | TRBDF
-        plotExplicit: false,       // write only the datasets Plot names
+        iterations: 40,
+        notdamped: 20,
+        threads: 4,
+        method: 'ParDiSo',
+        rhsMin: '1e-12',
+        errRef: '1e10',
       },
 
       plot: {
-        potential: true, field: true, carriers: true, doping: true,
-        current: true, mobility: true, bands: true, recombination: true,
-        temperature: true,
-        drivingForce: false,
-        bandgapNarrowing: false,
+        carriers: true, current: true, potential: true, doping: true,
+        quasiFermi: true, bands: true, mobility: true,
       },
 
-      output: {
-        currentPlot: true,         // the CurrentPlot / .plt log
-        extraction: true,          // the extraction notes at the foot
-        parameterFile: '',         // File { Parameter = "..." }; '' omits it
-        acAnalysis: false,         // small-signal ACCoupled sweep
-        acStart: 1e3,
-        acEnd: 1e9,
-        acPointsPerDecade: 5,
-      },
-
-      meshControl: { size: 2.0 },  // nm, for the SCM refinement block
+      meshControl: { size: 2.0 },     // nm, for the SCM refinement block
     };
+  }
+
+
+  /* ==================================================================
+     3. THE DECK
+     ==================================================================
+     One file per device. Everything that names something in the
+     structure - electrodes, gate regions, the grid file - is read from
+     the parsed SCM, so a structure with different names still produces
+     a deck that refers to things that exist.
+     ================================================================== */
+
+  /** Every metal region belonging to one device's gate, in build order. */
+  function gateRegionsOf(regions, tag) {
+    return regions
+      .filter((r) => /tin|tungsten|metal|poly/i.test(r.material))
+      .filter((r) => r.name.startsWith(tag + '_'))
+      .map((r) => r.name);
+  }
+
+  /** "0p05" / "m0p70" - a voltage as a filename-safe token. */
+  function vTag(v) {
+    const s = Math.abs(v).toFixed(2).replace('.', 'p');
+    return (v < 0 ? 'm' : '') + s;
+  }
+
+  function f2(v) { return Number(v).toFixed(2).replace(/\.?0+$/, (m) => m); }
+
+  /** Voltages inside comments are always two decimals: "-0.70 V". */
+  function vc(v) { return Number(v).toFixed(2); }
+
+  /** A number the way the decks write it in a Goal: -0.7, 0.05, 0.0 */
+  function volts(v) {
+    const s = Number(v).toFixed(2);
+    return s.replace(/0$/, '').replace(/\.$/, '.0');
+  }
+
+  function buildSdevice(parsed, analysis, st) {
+    const elec = classifyElectrodes(parsed.contacts);
+    const devs = devicesOf(elec);
+    const want = st.device === 'both' ? devs : devs.filter((d) => d.tag === st.device);
+    if (!want.length) {
+      return '* No device matching the selection was found in this structure.\n';
+    }
+    return want.map((d) => oneDeck(parsed, st, elec, devs, d)).join(
+      '\n\n' + '* '.repeat(1) +
+      '='.repeat(74) + '\n\n');
+  }
+
+  function oneDeck(parsed, st, elec, devs, d) {
+    const L = [];
+    const P = (...xs) => L.push(...xs);
+    const T = d.tag;                       // 'n' or 'p'
+    const name = T + 'mos';
+    const sgn = T === 'p' ? -1 : 1;        // pMOS biases are negative
+    const b = st.bias;
+    const regions = parsed.regions || [];
+
+    const vdd = sgn * b.vdd;
+    const vlin = sgn * b.vdlin;
+
+    /* ---------------- banner ---------------- */
+    P('* ' + '='.repeat(74));
+    P(`*  sdevice_${name}.cmd  --  3D FORKSHEET CMOS, ${T.toUpperCase()}MOS I-V ONLY`);
+    P(`*  Structure: ${st.grid}`);
+    P('*');
+    P(`*  ${elec.length} electrodes, matching the SCM exactly:`);
+    P('*    ' + elec.map((e) => e.name).join(' '));
+    if (T === 'p' && !elec.some((e) => e.role === 'wellp')) {
+      P('*  There is NO n-well electrode in this structure, so the n-well floats.');
+      P('*  Expect the drain current to be dominated by the open-base p+/n/p+');
+      P('*  path and to be insensitive to the gate.');
+    }
+    P('*');
+    P(`*  Isothermal ${st.temperature} K, drift-diffusion, no Thermodynamic.`);
+    P('*');
+    P(`*  BIAS: ${d.source.name} = 0 V, ${d.gate.name} and ${d.drain.name} driven ` +
+      (sgn < 0 ? 'NEGATIVE.' : 'POSITIVE.'));
+    if (sgn < 0) P('*        Drain TotalCurrent is NEGATIVE -- plot |Id| on a log axis.');
+    P('*');
+    P('*  OUTPUT FILES (x-axis column in brackets)');
+    if (b.idvgLin) P(`*    ${name}_IdVg_Vd${vTag(vlin)}_des.plt   Id-Vg, Vds = ${vc(vlin)} V  [${d.gate.name}]`);
+    if (b.idvgSat) P(`*    ${name}_IdVg_Vd${vTag(vdd)}_des.plt   Id-Vg, Vds = ${vc(vdd)} V  [${d.gate.name}]`);
+    if (b.idvd) {
+      for (const vg of b.vgSteps) {
+        P(`*    ${name}_IdVd_Vg${vTag(sgn * vg)}_des.plt   Id-Vd, Vgs = ${vc(sgn * vg)} V  [${d.drain.name}]`);
+      }
+    }
+    if (b.onStateSnapshot && b.idvgSat) {
+      P(`*    ${name}_OnState_Vg${vTag(vdd)}_Vd${vTag(vdd)}   field snapshot (.tdr)`);
+    }
+    P('* ' + '='.repeat(74));
+    P('');
+
+    /* ---------------- File ---------------- */
+    P('File {');
+    P(`   Grid    = "${st.grid}"`);
+    P(`   Plot    = "${name}_final"`);
+    P(`   Current = "${name}_init"`);
+    P(`   Output  = "${name}_log"`);
+    P('}');
+    P('');
+
+    /* ---------------- Electrode ----------------
+       The driven device first, then everything else grounded, so the
+       deck reads in the order it is used. */
+    const mine = [d.source.name, d.drain.name, d.gate.name];
+    P('Electrode {');
+    for (const nm of mine) P(`   { Name = "${nm}"${pad(nm)}Voltage = 0.0 }`);
+    const idle = elec.filter((e) => !mine.includes(e.name));
+    if (idle.length) {
+      P(`   * ---- idle ${T === 'n' ? 'pMOS' : 'nMOS'} and substrate, all grounded ----`);
+      for (const e of idle) P(`   { Name = "${e.name}"${pad(e.name)}Voltage = 0.0 }`);
+    }
+    P('}');
+    P('');
+
+    /* ---------------- Physics ---------------- */
+    const ph = st.physics;
+    P('Physics {');
+    P(`   Temperature = ${st.temperature}`);
+    P(`   AreaFactor  = ${st.areaFactor}`);
+    const mob = [];
+    if (ph.mobDoping) mob.push('DopingDependence');
+    if (ph.mobEnormal) mob.push('Enormal');
+    if (ph.mobHighField) mob.push('HighFieldSaturation');
+    if (mob.length) P(`   Mobility ( ${mob.join(' ')} )`);
+    if (ph.srh) P('   Recombination ( SRH ( DopingDependence ) )');
+    if (ph.eid) P('   EffectiveIntrinsicDensity ( OldSlotboom )');
+    P('}');
+    P('');
+
+    /* ---------------- per-gate workfunction ----------------
+       The threshold knob. Applied region by region because the gate is
+       built from several abutting metal pieces, and a Physics(Region=)
+       block covers exactly one of them. The idle device keeps its own
+       workfunction so it stays off rather than inverting by accident. */
+    for (const dd of devs) {
+      const gates = gateRegionsOf(regions, dd.tag);
+      if (!gates.length) continue;
+      const w = st.workfunction[dd.tag];
+      P(`* ---- ${dd.tag.toUpperCase()}MOS gate workfunction` +
+        (dd.tag === T ? ' (Vth knob) ----' : ' -- keeps the idle device OFF ----'));
+      const wide = Math.max(...gates.map((x) => x.length));
+      for (const gname of gates) {
+        P(`Physics ( Region = "${gname}"${' '.repeat(wide - gname.length)} ) ` +
+          `{ MetalWorkfunction ( Workfunction = ${Number(w).toFixed(2)} ) }`);
+      }
+      P('');
+    }
+
+    /* ---------------- Plot ---------------- */
+    const pl = st.plot;
+    P('Plot {');
+    if (pl.carriers) P('   eDensity  hDensity');
+    if (pl.current) P('   eCurrent/Vector  hCurrent/Vector  Current/Vector');
+    if (pl.potential) P('   Potential  ElectricField/Vector  SpaceCharge');
+    if (pl.doping) P('   Doping  DonorConcentration  AcceptorConcentration');
+    if (pl.quasiFermi) P('   eQuasiFermiPotential  hQuasiFermiPotential');
+    if (pl.bands) P('   ConductionBandEnergy  ValenceBandEnergy');
+    if (pl.mobility) P('   eMobility  hMobility');
+    P('}');
+    P('');
+
+    /* ---------------- Math ---------------- */
+    const m = st.math;
+    P('Math {');
+    P('   Extrapolate');
+    P('   Derivatives');
+    P('   RelErrControl');
+    P(`   Digits           = ${m.digits}`);
+    P(`   ErrRef(electron) = ${m.errRef}`);
+    P(`   ErrRef(hole)     = ${m.errRef}`);
+    P(`   Iterations       = ${m.iterations}`);
+    P(`   Notdamped        = ${m.notdamped}`);
+    P('   ExitOnFailure');
+    P(`   NumberOfThreads  = ${m.threads}`);
+    P(`   Method           = ${m.method}`);
+    P(`   RhsMin           = ${m.rhsMin}`);
+    P('}');
+    P('');
+
+    /* ---------------- Solve ---------------- */
+    P(...solveBlock(st, d, name, sgn));
+    return L.join('\n').replace(/\n{3,}/g, '\n\n').replace(/\s+$/, '') + '\n';
+  }
+
+  function pad(nm) {
+    return ' '.repeat(Math.max(1, 11 - nm.length));
+  }
+
+  /** The coupled set these decks solve: isothermal drift-diffusion. */
+  function coupled() { return 'Coupled { Poisson Electron Hole }'; }
+
+  /** A setup ramp: get somewhere, no measurement. */
+  function goTo(pairs, step, maxStep) {
+    const L = [];
+    L.push(`   Quasistationary ( InitialStep = ${step} MinStep = 1e-5 MaxStep = ${maxStep}`);
+    for (const [nm, v] of pairs) L.push(`      Goal { Name = "${nm}" Voltage = ${volts(v)} }`);
+    L.push(`   ) { ${coupled()} }`);
+    L.push('');
+    return L;
+  }
+
+  /** A measured sweep: finer steps, and a CurrentPlot so points land in the .plt. */
+  function measure(nm, v, st, prefix) {
+    const b = st.bias;
+    return [
+      `   NewCurrentPrefix = "${prefix}"`,
+      `   Quasistationary ( InitialStep = ${b.sweepStep} MinStep = 1e-5 MaxStep = ${b.sweepStep}`,
+      `      Goal { Name = "${nm}" Voltage = ${volts(v)} }`,
+      `   ) { ${coupled()}`,
+      `       CurrentPlot ( Time = (Range = (0 1) Intervals = ${b.intervals}) ) }`,
+      '',
+    ];
+  }
+
+  function solveBlock(st, d, name, sgn) {
+    const L = [];
+    const b = st.bias;
+    const G = d.gate.name, D = d.drain.name;
+    const vdd = sgn * b.vdd, vlin = sgn * b.vdlin;
+    let n = 0;
+
+    L.push('Solve {');
+    L.push('');
+    L.push('   * ---- equilibrium ----');
+    L.push('   Coupled ( Iterations = 150 ) { Poisson }');
+    L.push('   Coupled ( Iterations = 100 ) { Poisson Electron Hole }');
+    L.push('');
+
+    const head = (title) => {
+      n += 1;
+      L.push('   * ' + '='.repeat(70));
+      L.push(`   * ${n}. ${title}`);
+      L.push('   * ' + '='.repeat(70));
+    };
+    const reset = (pairs, tag) => {
+      L.push(`   * ---- return to 0 V ----`);
+      L.push(`   NewCurrentPrefix = "${name}_${tag}_"`);
+      L.push(...goTo(pairs, '0.05', '0.1'));
+    };
+
+    if (b.idvgLin) {
+      head(`Id-Vg at Vds = ${vc(vlin)} V${' '.repeat(8)}x-axis: ${G}`);
+      L.push(`   * ---- ramp drain to Vds = ${vc(vlin)} V ----`);
+      L.push(...goTo([[D, vlin]], '0.05', '0.1'));
+      L.push(`   * ---- gate sweep: Vgs = 0 to ${vc(vdd)} V at fixed Vds = ${vc(vlin)} V ----`);
+      L.push(...measure(G, vdd, st, `${name}_IdVg_Vd${vTag(vlin)}_`));
+      reset([[G, 0], [D, 0]], 'reset1');
+    }
+
+    if (b.idvgSat) {
+      head(`Id-Vg at Vds = ${vc(vdd)} V${' '.repeat(8)}x-axis: ${G}`);
+      L.push(`   * ---- ramp drain to Vds = ${vc(vdd)} V ----`);
+      L.push(...goTo([[D, vdd]], '0.02', '0.05'));
+      L.push(`   * ---- gate sweep: Vgs = 0 to ${vc(vdd)} V at fixed Vds = ${vc(vdd)} V ----`);
+      L.push(...measure(G, vdd, st, `${name}_IdVg_Vd${vTag(vdd)}_`));
+      if (b.onStateSnapshot) {
+        L.push(`   Plot ( FilePrefix = "${name}_OnState_Vg${vTag(vdd)}_Vd${vTag(vdd)}" )`);
+        L.push('');
+      }
+      reset([[G, 0], [D, 0]], 'reset2');
+    }
+
+    if (b.idvd) {
+      let prev = 0;
+      b.vgSteps.forEach((vgAbs, i) => {
+        const vg = sgn * vgAbs;
+        head(`Id-Vd at Vgs = ${vc(vg)} V${' '.repeat(8)}x-axis: ${D}`);
+        L.push(i === 0
+          ? `   * ---- set gate to Vgs = ${vc(vg)} V ----`
+          : `   * ---- step gate from ${vc(prev)} V to ${vc(vg)} V ----`);
+        L.push(...goTo([[G, vg]], '0.05', '0.1'));
+        L.push(`   * ---- drain sweep: Vds = 0 to ${vc(vdd)} V at fixed Vgs = ${vc(vg)} V ----`);
+        L.push(...measure(D, vdd, st, `${name}_IdVd_Vg${vTag(vg)}_`));
+        // the last family member leaves the device biased; nothing follows it
+        if (i < b.vgSteps.length - 1) {
+          L.push('   * ---- return drain to 0 V ----');
+          L.push(`   NewCurrentPrefix = "${name}_reset${i + 3}_"`);
+          L.push(...goTo([[D, 0]], '0.05', '0.1'));
+        }
+        prev = vg;
+      });
+    }
+
+    L.push('}');
+    return L;
   }
 
 
@@ -284,44 +535,50 @@
       ok(`Grid file: ${st.grid}`);
     }
 
-    /* ---- thermal ---- */
-    if (st.thermal.enabled) {
-      if (!st.thermal.thermode) {
-        err('Self-heating is enabled but no thermal contact is selected. ' +
-            'A Thermodynamic run with no Thermode has no heat sink: the ' +
-            'device heats without limit and the solve will not converge.');
-      } else if (!contacts.some((c) => c.name === st.thermal.thermode)) {
-        err(`Thermal contact "${st.thermal.thermode}" is not one of the ` +
-            `contacts in this structure.`);
-      } else {
-        ok(`Thermal contact: "${st.thermal.thermode}" at ${st.thermal.ambient} K`);
-      }
-    } else {
-      ok('Self-heating disabled - isothermal solve');
-    }
+    /* ---- these decks are isothermal by construction ---- */
+    ok(`Isothermal ${st.temperature} K, drift-diffusion - no Thermodynamic`);
 
     /* ---- bias ---- */
-    for (const d of devs) {
+    const want = st.device === 'both' ? devs : devs.filter((d) => d.tag === st.device);
+    if (!want.length) {
+      err(`No ${st.device === 'n' ? 'n' : 'p'}MOS was found in this structure, ` +
+          `so the selected deck cannot be written.`);
+    }
+    for (const d of want) {
       for (const e of [d.gate, d.source, d.drain]) {
         if (!contacts.some((c) => c.name === e.name)) {
           err(`Bias references electrode "${e.name}", which is not in the structure.`);
         }
       }
-    }
-    if (!(st.bias.vdd > 0)) err('Supply voltage must be positive.');
-
-    /* ---- output / extraction ---- */
-    const wanted = currentPlotRegions(regions, devs);
-    for (const rname of wanted) {
-      if (!regions.some((r) => r.name === rname)) {
-        err(`CurrentPlot references region "${rname}", which does not exist.`);
+      const gates = regions.filter((r) => /tin|tungsten|metal|poly/i.test(r.material) &&
+        r.name.startsWith(d.tag + '_')).length;
+      if (!gates) {
+        err(`No gate metal regions found for the ${d.tag.toUpperCase()}MOS, so no ` +
+            `workfunction can be applied - the threshold would be undefined.`);
+      } else {
+        ok(`${d.tag.toUpperCase()}MOS gate: ${gates} metal region(s) at ` +
+           `${st.workfunction[d.tag]} eV`);
+      }
+      /* The pMOS body needs a terminal. Without one the well floats, the
+         p+/well junction forward-biases and the open-base bipolar carries
+         the current instead of the channel - the Id-Vg stops being gate
+         controlled. That is a property of the structure, not the deck, so
+         it is a warning here rather than an error. */
+      if (d.tag === 'p' && !d.well) {
+        warn('The pMOS body has no electrode in this structure, so the n-well ' +
+             'floats. Expect the drain current to be dominated by the open-base ' +
+             'p+/n/p+ path and to be insensitive to the gate.');
       }
     }
-    if (wanted.length) ok(`Per-region temperature output: ${wanted.join(', ')}`);
-    else if (st.thermal.enabled) {
-      warn('No drain or channel region matched for per-region temperature; ' +
-           'only the global maximum will be written.');
+    if (!(st.bias.vdd > 0)) err('Supply voltage must be positive.');
+    if (!(st.bias.sweepStep > 0)) err('Sweep step must be positive.');
+    for (const vg of st.bias.vgSteps || []) {
+      if (!(vg >= 0)) err(`Id-Vd gate step ${vg} must be zero or positive; ` +
+                          `the sign is applied per device.`);
     }
+    ok(`Sweeps: ${[st.bias.idvgLin && 'Id-Vg linear', st.bias.idvgSat && 'Id-Vg saturation',
+        st.bias.idvd && `Id-Vd x${(st.bias.vgSteps || []).length}`]
+        .filter(Boolean).join(', ') || 'none selected'}`);
 
     return { findings: out, ok: !out.some((f) => f.level === 'error'), electrodes: elec, devices: devs };
   }
@@ -341,367 +598,6 @@
       }
     }
     return picked;
-  }
-
-
-  /* ==================================================================
-     4. THE COMMAND FILE
-     ================================================================== */
-
-  const f = (v, d) => Number(v).toFixed(d === undefined ? 2 : d);
-
-  function buildSdevice(parsed, analysis, st) {
-    const regions = parsed.regions || [];
-    const elec = classifyElectrodes(parsed.contacts);
-    const devs = devicesOf(elec);
-    const L = [];
-    const P = (...xs) => L.push(...xs);
-
-    /* ---------------- header ---------------- */
-    const mats = [...new Set(regions.map((r) => r.material))].sort();
-    P('*  sdevice.cmd  --  generated from ' + st.grid);
-    P(`*  ${regions.length} regions  |  ${mats.join(', ')}`);
-    P(`*  ${elec.length} electrodes: ${elec.map((e) => e.name).join(', ')}`);
-    if (analysis && analysis.architecture) P(`*  ${analysis.architecture.name}`);
-    P('*  Regenerate this file if the mesh is rebuilt from a different structure.');
-    P('');
-
-    /* ---------------- File ---------------- */
-    P('File {');
-    P(`    Grid    = "${st.grid}"`);
-    /* The .par file is where material and model parameters are overridden.
-       Omitted entirely when blank rather than emitted empty, because a
-       Parameter line pointing at a file that does not exist is fatal. */
-    if (st.output.parameterFile) P(`    Parameter = "${st.output.parameterFile}"`);
-    P(`    Plot    = "${st.stem}_des.tdr"`);
-    P(`    Current = "${st.stem}_des.plt"`);
-    P(`    Output  = "${st.stem}_des.log"`);
-    P('}');
-    P('');
-
-    /* ---------------- Electrode ---------------- */
-    P('*  Every contact in the mesh must appear here or SDevice aborts.');
-    P('Electrode {');
-    for (const e of elec) {
-      const wf = st.workfunction[e.name];
-      const tag = e.role === 'other' ? '' : `   * ${e.role}${e.device ? ' (' + e.device + ')' : ''}`;
-      const o = (st.electrodeOpts && st.electrodeOpts[e.name]) || {};
-      let extra = '';
-      if (o.schottky) extra += `  Schottky  Barrier=${f(o.barrier || 0)}`;
-      else if (wf !== undefined) extra += `  Workfunction=${f(wf)}`;
-      if (o.resistor) extra += `  Resistor=${o.resistor}`;
-      P(`    { Name="${e.name}"` + ' '.repeat(Math.max(1, 12 - e.name.length)) +
-        `Voltage=0.0` + extra + ' }' + tag);
-    }
-    P('}');
-    P('');
-
-    /* ---------------- Thermode ---------------- */
-    if (st.thermal.enabled && st.thermal.thermode) {
-      P('*  Single heat sink; every other contact stays adiabatic.');
-      P('Thermode {');
-      P(`    { Name = "${st.thermal.thermode}"  Temperature = ${st.thermal.ambient}` +
-        `  SurfaceResistance = ${Number(st.thermal.surfaceResistance).toFixed(1)} }`);
-      P('}');
-      P('');
-    }
-
-    /* ---------------- Physics ---------------- */
-    const ph = st.physics;
-    P('Physics {');
-    P(`    Temperature = ${st.temperature}`);
-    if (ph.fermi) P('    Fermi');
-    if (ph.eid) P('    EffectiveIntrinsicDensity( OldSlotboom )');
-    if (ph.bandgapNarrowing) P(`    EffectiveIntrinsicDensity( BandGapNarrowing( ${ph.bandgapNarrowing} ) )`);
-    const mob = [];
-    if (ph.mobDoping) mob.push('DopingDependence');
-    if (ph.mobEnormal) mob.push('Enormal');
-    if (ph.mobHighField) mob.push('HighFieldSaturation');
-    if (mob.length) {
-      P('    Mobility(');
-      for (const m of mob) P(`        ${m}`);
-      P('    )');
-    }
-    const rec = [];
-    if (ph.srh) rec.push('SRH( DopingDependence )');
-    if (ph.auger) rec.push('Auger');
-    if (ph.band2band) rec.push('Band2Band( Model = Hurkx )');
-    if (ph.avalanche) rec.push('Avalanche( vanOverstraeten )');
-    if (ph.surfaceSRH) rec.push('SurfaceSRH');
-    if (rec.length) {
-      P('    Recombination(');
-      for (const r of rec) P(`        ${r}`);
-      P('    )');
-    }
-    if (ph.tunneling) P(`    eBarrierTunneling( ${ph.tunneling} )  hBarrierTunneling( ${ph.tunneling} )`);
-    if (ph.quantum) P('    eQuantumPotential  hQuantumPotential');
-    /* Transport: drift-diffusion is the default; Thermodynamic adds the
-       lattice-heat equation, Hydrodynamic adds carrier energy balance.
-       Self-heating needs Thermodynamic, so it wins over a plain dd choice
-       rather than silently producing a deck with no heat equation. */
-    const transport = st.thermal.enabled && ph.transport === 'dd'
-      ? 'thermodynamic' : ph.transport;
-    if (transport === 'thermodynamic') P('    Thermodynamic');
-    if (transport === 'hydrodynamic') P('    Hydrodynamic( eTemperature hTemperature )');
-    if (st.thermal.enabled) P(`    LatticeTemperature = ${st.thermal.latticeInit}`);
-    P('}');
-    P('');
-
-    /* ---------------- Plot ---------------- */
-    const pl = st.plot;
-    P('Plot {');
-    if (pl.potential) P('    Potential\n    SpaceCharge');
-    if (pl.field) P('    ElectricField/Vector');
-    if (pl.carriers) P('    eDensity\n    hDensity\n    eQuasiFermiEnergy\n    hQuasiFermiEnergy');
-    if (pl.doping) P('    Doping\n    DonorConcentration\n    AcceptorConcentration');
-    if (pl.current) P('    Current/Vector\n    eCurrent/Vector\n    hCurrent/Vector');
-    if (pl.mobility) P('    eMobility\n    hMobility\n    eVelocity\n    hVelocity');
-    if (pl.bands) P('    BandGap\n    ConductionBandEnergy\n    ValenceBandEnergy');
-    if (pl.recombination) {
-      P('    SRHRecombination\n    AugerRecombination\n    TotalRecombination');
-      if (ph.band2band) P('    Band2BandGeneration');
-      if (ph.avalanche) P('    AvalancheGeneration\n    eAvalancheGeneration\n    hAvalancheGeneration');
-    }
-    /* Driving forces: what the high-field and surface mobility models are
-       actually responding to, so a suspicious mobility can be traced. */
-    if (pl.drivingForce) {
-      P('    eEparallel\n    hEparallel\n    eENormal\n    hENormal');
-      P('    eGradQuasiFermi/Vector\n    hGradQuasiFermi/Vector');
-    }
-    if (pl.bandgapNarrowing) P('    BandgapNarrowing\n    Affinity');
-    if (ph.quantum) P('    eQuantumPotential\n    hQuantumPotential');
-    if (pl.temperature && st.thermal.enabled) {
-      P('    LatticeTemperature\n    TotalHeat\n    ThermalConductivity\n    LatticeHeatFlux/Vector');
-    }
-    P('}');
-    P('');
-
-    /* ---------------- CurrentPlot ---------------- */
-    if (st.output.currentPlot) {
-      const rows = [];
-      if (st.thermal.enabled) {
-        rows.push('    LatticeTemperature( Maximum( Material = "Silicon" )');
-        rows.push('                        Average( Material = "Silicon" ) )');
-        for (const rname of currentPlotRegions(regions, devs)) {
-          rows.push(`    LatticeTemperature( Maximum( Region = "${rname}" ) )`);
-        }
-        if (st.thermal.heatFlux) {
-          rows.push('    TotalHeat( Integrate( Material = "Silicon" ) )');
-        }
-      }
-      /* Without self-heating there is nothing thermal to log, but the .plt
-         is still worth writing: it is where the I-V curves come from. */
-      if (rows.length) {
-        P('CurrentPlot {');
-        for (const r of rows) P(r);
-        P('}');
-        P('');
-      }
-    }
-
-    /* ---------------- Math ---------------- */
-    const m = st.math;
-    P('Math {');
-    if (m.extrapolate) P('    Extrapolate');
-    if (m.derivatives) P('    Derivatives');
-    if (m.relErrControl) P('    RelErrControl');
-    P(`    Digits            = ${m.digits}`);
-    /* ErrRef, with two r's. It was ErRef here, which is not a Math keyword
-       and would be rejected rather than ignored. */
-    P(`    ErrRef( electron ) = ${m.errRef}`);
-    P(`    ErrRef( hole )     = ${m.errRef}`);
-    P(`    Iterations        = ${m.iterations}`);
-    P(`    Notdamped         = ${m.notdamped}`);
-    P(`    Method    = ${m.method}`);
-    P(`    SubMethod = ${m.subMethod}`);
-    if (m.threads > 1) P(`    Number_Of_Threads = ${m.threads}`);
-    /* Only meaningful with Avalanche active, and costly otherwise. */
-    if (ph.avalanche) P('    AvalDerivatives');
-    if (st.bias.analysis === 'transient') P(`    Transient = ${m.transientScheme}`);
-    if (m.plotExplicit) P('    PlotExplicit');
-    P('    ExitOnFailure');
-    P('}');
-    P('');
-
-    /* ---------------- Solve ---------------- */
-    P(...solveBlock(st, devs));
-
-    /* ---------------- extraction notes ---------------- */
-    if (st.output.extraction) {
-      P('');
-      P(...extractionNotes(st, devs));
-    }
-
-    return L.join('\n').replace(/\n{3,}/g, '\n\n').replace(/\s+$/, '') + '\n';
-  }
-
-  /** The carrier set each Coupled step solves for. */
-  function coupledSet(st) {
-    return st.thermal.enabled
-      ? 'Coupled { Poisson Electron Hole Temperature }'
-      : 'Coupled { Poisson Electron Hole }';
-  }
-
-  function ramp(goalName, voltage, st, indent) {
-    const i = indent || '    ';
-    return [
-      `${i}Quasistationary(`,
-      `${i}    InitialStep = 0.05  Increment = 1.3  Decrement = 2`,
-      `${i}    MinStep = 1.0e-5    MaxStep = 0.1`,
-      `${i}    Goal { Name = "${goalName}"  Voltage = ${voltage} }`,
-      `${i}){ ${coupledSet(st)} }`,
-      '',
-    ];
-  }
-
-  function sweep(goalName, voltage, st, indent) {
-    const i = indent || '    ';
-    const step = (st.bias && st.bias.vgStep) || 0.02;
-    return [
-      `${i}Quasistationary(`,
-      `${i}    InitialStep = ${step}  Increment = 1.2  Decrement = 2`,
-      `${i}    MinStep = 1.0e-6    MaxStep = ${step}`,
-      `${i}    Goal { Name = "${goalName}"  Voltage = ${voltage} }`,
-      `${i}){ ${coupledSet(st)} }`,
-      '',
-    ];
-  }
-
-  function solveBlock(st, devs) {
-    const L = [];
-    const b = st.bias;
-
-    L.push('Solve {');
-    L.push('');
-    L.push('*   ---- equilibrium ----');
-    L.push('    NewCurrentPrefix = "init_"');
-    /* Any electrode the user gave a non-zero starting potential is ramped
-       to it before equilibrium. The names come from the SCM, so this works
-       for whatever electrodes the structure actually declares. */
-    for (const [name, v] of Object.entries(b.initial || {})) {
-      if (!v) continue;
-      L.push(`    Set( "${name}" = ${Number(v).toFixed(3)} )`);
-    }
-    L.push('    Coupled( Iterations = 100 ) { Poisson }');
-    L.push('    Coupled                    { Poisson Electron Hole }');
-    if (st.thermal.enabled) {
-      L.push('    Coupled                    { Poisson Electron Hole Temperature }');
-    }
-    L.push('');
-
-    for (const d of devs) {
-      /* PMOS biases are negative; the sign is physics, not a label */
-      const sgn = d.tag === 'p' ? -1 : 1;
-      const vdd = (sgn * b.vdd).toFixed(2);
-      const vlin = (sgn * b.vdlin).toFixed(2);
-      const vg0 = (sgn * b.vgStart).toFixed(2);
-      const T = d.tag;
-
-      L.push(`*   ================= ${T.toUpperCase()}MOS =================`);
-      L.push(`*   source "${d.source.name}" stays at 0 V.` +
-             (d.well ? `  Body "${d.well.name}" is held at the source potential,` : ''));
-      if (d.well) L.push('*   which is what an n-well tap does in a real layout.');
-      L.push('');
-
-      if (b.idvgLin) {
-        L.push(`    NewCurrentPrefix = "${T}_pre_lin_"`);
-        L.push(...ramp(d.drain.name, vlin, st));
-        L.push(...ramp(d.gate.name, vg0, st));
-        L.push(`    NewCurrentPrefix = "${T}_idvg_lin_"`);
-        L.push(...sweep(d.gate.name, vdd, st));
-      }
-
-      if (b.idvgSat) {
-        L.push(`    NewCurrentPrefix = "${T}_pre_sat_"`);
-        L.push(...ramp(d.gate.name, vg0, st));
-        L.push(...ramp(d.drain.name, vdd, st));
-        L.push(`    NewCurrentPrefix = "${T}_idvg_sat_"`);
-        L.push(...sweep(d.gate.name, vdd, st));
-        L.push(`    Plot( FilePrefix = "${T}_final" NoOverwrite )`);
-        L.push('');
-      }
-
-      if (b.idvd) {
-        L.push(`    NewCurrentPrefix = "${T}_pre_vd_"`);
-        L.push(...ramp(d.drain.name, '0.0', st));
-        L.push(`    NewCurrentPrefix = "${T}_idvd_"`);
-        L.push(...sweep(d.drain.name, vdd, st));
-      }
-
-      /* ---- small-signal, for Cgg / Cgd / ft ----
-         ACCoupled sweeps frequency at the bias already established, so it
-         is written after the DC sweeps rather than in place of them. */
-      if (st.output.acAnalysis) {
-        L.push(`*   ---- ${T.toUpperCase()}MOS small-signal ----`);
-        L.push(`    NewCurrentPrefix = "${T}_ac_"`);
-        L.push('    ACCoupled (');
-        L.push(`        StartFrequency = ${st.output.acStart}  EndFrequency = ${st.output.acEnd}`);
-        L.push(`        NumberOfPoints = ${st.output.acPointsPerDecade}  Decade`);
-        L.push(`        Node( "${d.gate.name}" "${d.drain.name}" "${d.source.name}" )`);
-        L.push('        Exclude( Poisson )');
-        L.push(`    ){ ${coupledSet(st)} }`);
-        L.push('');
-      }
-
-      /* ---- transient, when that analysis was chosen ---- */
-      if (b.analysis === 'transient') {
-        L.push(`*   ---- ${T.toUpperCase()}MOS transient ----`);
-        L.push(`    NewCurrentPrefix = "${T}_tran_"`);
-        L.push('    Transient (');
-        L.push(`        InitialTime = 0  FinalTime = ${b.transientEnd}`);
-        L.push(`        InitialStep = ${b.transientStep}  Increment = 1.3  Decrement = 2`);
-        L.push(`        MinStep = ${Number(b.transientStep) / 1000}  MaxStep = ${Number(b.transientEnd) / 20}`);
-        L.push(`    ){ ${coupledSet(st)} }`);
-        L.push('');
-      }
-
-      /* return to zero so the next device starts from the same clean state */
-      L.push(`*   ---- return ${T.toUpperCase()}MOS to zero ----`);
-      L.push(`    NewCurrentPrefix = "${T}_reset_"`);
-      L.push(...ramp(d.gate.name, '0.0', st));
-      L.push(...ramp(d.drain.name, '0.0', st));
-
-      /* A current-driven sweep needs the electrode switched out of voltage
-         mode first; SDevice will not ramp a current on a voltage contact. */
-      if (b.sweepQuantity === 'current') {
-        L.push(`*   ---- ${T.toUpperCase()}MOS drain driven by current ----`);
-        L.push(`    set ("${d.drain.name}" mode current)`);
-        L.push(`    NewCurrentPrefix = "${T}_idrive_"`);
-        L.push('    Quasistationary(');
-        L.push('        InitialStep = 0.01  Increment = 1.3  Decrement = 2');
-        L.push('        MinStep = 1.0e-6    MaxStep = 0.1');
-        L.push(`        Goal { Name = "${d.drain.name}"  Current = ${(d.tag === 'p' ? -1 : 1) * 1e-6} }`);
-        L.push(`    ){ ${coupledSet(st)} }`);
-        L.push(`    set ("${d.drain.name}" mode voltage)`);
-        L.push('');
-      }
-    }
-
-    L.push('}');
-    return L;
-  }
-
-  /**
-   * Only the two notes that stop a wrong number being reported: the drain
-   * current sign, and what Rth does and does not mean here. Everything else
-   * an engineer can read off the deck itself.
-   */
-  function extractionNotes(st, devs) {
-    const L = [];
-    L.push('*  SDevice reports current INTO a contact as positive, so the two');
-    L.push('*  device types have opposite drain current signs:');
-    for (const d of devs) {
-      L.push(`*     ID_${d.tag} = ${d.tag === 'p' ? '-' : ' '}I(${d.drain.name})` +
-             (d.tag === 'p' ? '   a positive I(drain) here means the body is floating' : ''));
-    }
-    if (st.thermal.enabled) {
-      L.push('*');
-      L.push('*  Rth = dT / (ID x VDS). With adiabatic side walls it grows with the');
-      L.push('*  domain depth and does not converge, so it is a property of the');
-      L.push('*  domain as much as the device. Compare two devices on the same');
-      L.push('*  domain; do not quote it as an absolute.');
-    }
-    return L;
   }
 
 
